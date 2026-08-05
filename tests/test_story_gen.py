@@ -44,7 +44,8 @@ def test_openai_story_generator_parses_response_and_sends_all_images():
 def test_claude_story_generator_parses_response_and_sends_all_images():
     fake_client = MagicMock()
     fake_client.messages.create.return_value.content = [
-        MagicMock(text=json.dumps(_payload()))
+        MagicMock(type="thinking", thinking="pondering the story..."),
+        MagicMock(type="text", text=json.dumps(_payload())),
     ]
     generator = ClaudeStoryGenerator(fake_client)
 
@@ -55,6 +56,7 @@ def test_claude_story_generator_parses_response_and_sends_all_images():
     content = kwargs["messages"][0]["content"]
     image_blocks = [block for block in content if block["type"] == "image"]
     assert len(image_blocks) == 2
+    assert kwargs["thinking"] == {"type": "disabled"}
 
 
 def test_create_story_generator_openai():

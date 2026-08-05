@@ -37,7 +37,9 @@ if st.button("Generate story", type="primary", disabled=not (pdf_file and voice_
             validate_duration(voice_bytes, MIN_VOICE_SECONDS, MAX_VOICE_SECONDS)
             status.update(label="Voice sample OK. Generating story and cloning voice...")
 
-            openai_client = OpenAI(api_key=get_secret("OPENAI_API_KEY"))
+            openai_client = (
+                OpenAI(api_key=get_secret("OPENAI_API_KEY")) if STORY_PROVIDER == "openai" else None
+            )
             anthropic_client = (
                 Anthropic(api_key=get_secret("ANTHROPIC_API_KEY"))
                 if STORY_PROVIDER == "claude"

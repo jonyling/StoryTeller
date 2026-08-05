@@ -50,7 +50,7 @@ class OpenAIStoryGenerator:
             model=self._model,
             messages=[{"role": "user", "content": content}],
             response_format={"type": "json_object"},
-            max_tokens=700,
+            max_tokens=1500,
         )
         payload = json.loads(response.choices[0].message.content)
         return StoryResult(
@@ -76,10 +76,12 @@ class ClaudeStoryGenerator:
             })
         response = self._client.messages.create(
             model=self._model,
-            max_tokens=700,
+            max_tokens=1500,
+            thinking={"type": "disabled"},
             messages=[{"role": "user", "content": content}],
         )
-        payload = json.loads(response.content[0].text)
+        text_block = next(block for block in response.content if block.type == "text")
+        payload = json.loads(text_block.text)
         return StoryResult(
             story_text=payload["story"],
             sfx_mood=payload["sfx_mood"],
