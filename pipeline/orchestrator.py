@@ -1,6 +1,5 @@
 import concurrent.futures
 
-from pipeline.audio_utils import prepare_accent_sample
 from pipeline.mixer import mix_narration_with_ambience
 from pipeline.pdf_ingest import extract_page_images
 from pipeline.sfx import fetch_ambience_clip
@@ -21,7 +20,6 @@ def run_pipeline(
     enable_sfx: bool,
     *,
     story_generator,
-    accent_detector,
     voice_cloner,
     narration_synthesizer,
     freesound_api_key: str,
@@ -35,23 +33,16 @@ def run_pipeline(
     _report("Reading images and voice sample...")
     images = extract_page_images(pdf_bytes)
 
-    _report("Generating story, detecting accent, and cloning voice...")
-    accent_sample = prepare_accent_sample(voice_bytes)
+    _report("Generating story and cloning voice...")
 
-    with concurrent.futures.ThreadPoolExecutor(max_workers=3) as executor:
+    with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
         story_future = executor.submit(story_generator.generate, images, language)
-        accent_future = executor.submit(accent_detector.detect, accent_sample, "mp3")
         clone_future = executor.submit(voice_cloner.clone, voice_bytes, "StoryTeller Voice")
 
         story_result = story_future.result()
-        accent_result = accent_future.result()
         voice_id = clone_future.result()
 
     style_description = story_result.tts_style_description
-    if accent_result.detected_language.strip().casefold() != language.strip().casefold():
-        style_description = (
-            f"{style_description} Speak with a {accent_result.accent_label} accent flavor."
-        )
 
     _report("Synthesizing narration...")
     with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:

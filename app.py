@@ -7,7 +7,6 @@ from anthropic import Anthropic
 from elevenlabs import ElevenLabs
 from openai import OpenAI
 
-from pipeline.accent import OpenAIAudioAccentDetector
 from pipeline.audio_utils import validate_duration
 from pipeline.config import STORY_PROVIDER, get_secret
 from pipeline.errors import PipelineError
@@ -49,7 +48,6 @@ if st.button("Generate story", type="primary", disabled=not (pdf_file and voice_
             story_generator = create_story_generator(
                 STORY_PROVIDER, openai_client=openai_client, anthropic_client=anthropic_client
             )
-            accent_detector = OpenAIAudioAccentDetector(openai_client)
             voice_cloner = ElevenLabsVoiceCloner(elevenlabs_client)
             narration_synthesizer = ElevenLabsNarrationSynthesizer(elevenlabs_client)
 
@@ -59,7 +57,6 @@ if st.button("Generate story", type="primary", disabled=not (pdf_file and voice_
                 language=language,
                 enable_sfx=enable_sfx,
                 story_generator=story_generator,
-                accent_detector=accent_detector,
                 voice_cloner=voice_cloner,
                 narration_synthesizer=narration_synthesizer,
                 freesound_api_key=get_secret("FREESOUND_API_KEY") if enable_sfx else "",

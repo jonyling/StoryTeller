@@ -13,7 +13,7 @@ for the full design.
   - macOS: `brew install ffmpeg`
   - Linux: `apt install ffmpeg`
 - API keys for:
-  - OpenAI (vision story generation + audio accent detection)
+  - OpenAI (vision story generation)
   - Anthropic (only if `STORY_PROVIDER=claude`)
   - ElevenLabs (voice cloning + narration synthesis)
   - Freesound (background ambience search) — request one directly from the
