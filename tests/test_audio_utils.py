@@ -3,7 +3,7 @@ import io
 import pytest
 from pydub import AudioSegment
 
-from pipeline.audio_utils import get_duration_seconds, validate_duration
+from pipeline.audio_utils import get_duration_seconds, prepare_accent_sample, validate_duration
 from pipeline.errors import ValidationError
 
 
@@ -35,3 +35,18 @@ def test_validate_duration_passes_within_range():
     audio_bytes = _silence_wav_bytes(2000)
     duration = validate_duration(audio_bytes, min_seconds=1, max_seconds=5)
     assert duration == pytest.approx(2.0, abs=0.05)
+
+
+def test_prepare_accent_sample_trims_to_max_seconds():
+    audio_bytes = _silence_wav_bytes(10000)
+    sample_bytes = prepare_accent_sample(audio_bytes, max_seconds=2.0)
+    duration = get_duration_seconds(sample_bytes)
+    assert duration == pytest.approx(2.0, abs=0.1)
+    assert duration < 10.0
+
+
+def test_prepare_accent_sample_returns_valid_mp3():
+    audio_bytes = _silence_wav_bytes(3000)
+    sample_bytes = prepare_accent_sample(audio_bytes, max_seconds=1.0)
+    decoded = AudioSegment.from_file(io.BytesIO(sample_bytes), format="mp3")
+    assert len(decoded) > 0

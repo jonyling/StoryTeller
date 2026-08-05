@@ -9,10 +9,10 @@ SFX_ATTENUATION_DB = -18
 def mix_narration_with_ambience(
     narration_bytes: bytes, ambience_bytes: typing.Optional[bytes]
 ) -> bytes:
-    narration = AudioSegment.from_file(io.BytesIO(narration_bytes))
     if not ambience_bytes:
-        return _export_mp3(narration)
+        return narration_bytes
 
+    narration = AudioSegment.from_file(io.BytesIO(narration_bytes))
     ambience = AudioSegment.from_file(io.BytesIO(ambience_bytes))
     ambience = _loop_to_length(ambience, len(narration))
     ambience = ambience + SFX_ATTENUATION_DB

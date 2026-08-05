@@ -25,6 +25,13 @@ def _silence_mp3_bytes(duration_ms):
     return buffer.getvalue()
 
 
+def _fake_voice_bytes(duration_ms=2000):
+    segment = AudioSegment.silent(duration=duration_ms, frame_rate=16000)
+    buffer = io.BytesIO()
+    segment.export(buffer, format="wav")
+    return buffer.getvalue()
+
+
 class FakeStoryGenerator:
     def generate(self, images, language):
         return StoryResult(
@@ -38,7 +45,7 @@ class FakeAccentDetector:
     def __init__(self, detected_language="English"):
         self._detected_language = detected_language
 
-    def detect(self, audio_bytes):
+    def detect(self, audio_bytes, audio_format="wav"):
         return AccentResult(accent_label="American English", detected_language=self._detected_language)
 
 
@@ -62,7 +69,7 @@ def test_run_pipeline_without_sfx(mock_fetch_ambience, tmp_path):
 
     result = run_pipeline(
         pdf_bytes=_make_pdf_bytes(),
-        voice_bytes=b"fake-voice-sample",
+        voice_bytes=_fake_voice_bytes(),
         language="English",
         enable_sfx=False,
         story_generator=FakeStoryGenerator(),
@@ -86,7 +93,7 @@ def test_run_pipeline_with_sfx_fetches_ambience(mock_fetch_ambience, tmp_path):
 
     result = run_pipeline(
         pdf_bytes=_make_pdf_bytes(),
-        voice_bytes=b"fake-voice-sample",
+        voice_bytes=_fake_voice_bytes(),
         language="English",
         enable_sfx=True,
         story_generator=FakeStoryGenerator(),
@@ -106,7 +113,7 @@ def test_run_pipeline_appends_accent_hint_when_cross_lingual(tmp_path):
 
     run_pipeline(
         pdf_bytes=_make_pdf_bytes(),
-        voice_bytes=b"fake-voice-sample",
+        voice_bytes=_fake_voice_bytes(),
         language="Mandarin",
         enable_sfx=False,
         story_generator=FakeStoryGenerator(),
@@ -119,3 +126,48 @@ def test_run_pipeline_appends_accent_hint_when_cross_lingual(tmp_path):
 
     style_description_used = narration_synth.calls[0][2]
     assert "American English accent flavor" in style_description_used
+
+
+@patch("pipeline.orchestrator.fetch_ambience_clip")
+def test_run_pipeline_survives_ambience_fetch_error(mock_fetch_ambience, tmp_path):
+    mock_fetch_ambience.side_effect = RuntimeError("Freesound is down")
+    narration_synth = FakeNarrationSynthesizer()
+
+    result = run_pipeline(
+        pdf_bytes=_make_pdf_bytes(),
+        voice_bytes=_fake_voice_bytes(),
+        language="English",
+        enable_sfx=True,
+        story_generator=FakeStoryGenerator(),
+        accent_detector=FakeAccentDetector(detected_language="English"),
+        voice_cloner=FakeVoiceCloner(),
+        narration_synthesizer=narration_synth,
+        freesound_api_key="fake-key",
+        sfx_cache_dir=str(tmp_path),
+    )
+
+    assert result.used_sfx is False
+    assert result.final_audio_bytes
+
+
+@patch("pipeline.orchestrator.fetch_ambience_clip")
+def test_run_pipeline_reports_progress(mock_fetch_ambience, tmp_path):
+    mock_fetch_ambience.return_value = _silence_mp3_bytes(500)
+    narration_synth = FakeNarrationSynthesizer()
+    progress_messages = []
+
+    run_pipeline(
+        pdf_bytes=_make_pdf_bytes(),
+        voice_bytes=_fake_voice_bytes(),
+        language="English",
+        enable_sfx=True,
+        story_generator=FakeStoryGenerator(),
+        accent_detector=FakeAccentDetector(detected_language="English"),
+        voice_cloner=FakeVoiceCloner(),
+        narration_synthesizer=narration_synth,
+        freesound_api_key="fake-key",
+        sfx_cache_dir=str(tmp_path),
+        on_progress=progress_messages.append,
+    )
+
+    assert len(progress_messages) > 1

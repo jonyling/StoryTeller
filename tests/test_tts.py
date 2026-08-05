@@ -18,7 +18,8 @@ def test_synthesize_joins_audio_chunks_and_passes_expected_params():
     assert audio_bytes == b"chunk1chunk2"
     args, kwargs = fake_client.text_to_speech.convert.call_args
     assert args[0] == "voice-123"
-    assert "warm and slow" in kwargs["text"]
-    assert "Once upon a time..." in kwargs["text"]
+    # style_description is accepted by the signature but must not be prepended
+    # into the text sent to the API (see comment in tts.py for why).
+    assert kwargs["text"] == "Once upon a time..."
     assert kwargs["model_id"] == "eleven_v3"
     assert kwargs["language_code"] == "zh"

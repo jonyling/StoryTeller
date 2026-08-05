@@ -16,8 +16,10 @@ for the full design.
   - OpenAI (vision story generation + audio accent detection)
   - Anthropic (only if `STORY_PROVIDER=claude`)
   - ElevenLabs (voice cloning + narration synthesis)
-  - Freesound (background ambience search) — see the Freesound API guide in
-    this repo's docs for how to request one and its token-based auth model.
+  - Freesound (background ambience search) — request one directly from the
+    Freesound developer portal (https://freesound.org/apiv2/apply/); see
+    `docs/superpowers/specs/2026-08-05-storyteller-pipeline-design.md` for how
+    it's used here.
 
 ## Setup
 

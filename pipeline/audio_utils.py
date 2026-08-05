@@ -23,3 +23,11 @@ def validate_duration(audio_bytes: bytes, min_seconds: float, max_seconds: float
             f"{max_seconds:.0f}s for voice cloning."
         )
     return duration
+
+
+def prepare_accent_sample(audio_bytes: bytes, max_seconds: float = 25.0) -> bytes:
+    segment = AudioSegment.from_file(io.BytesIO(audio_bytes))
+    trimmed = segment[: int(max_seconds * 1000)]
+    buffer = io.BytesIO()
+    trimmed.export(buffer, format="mp3")
+    return buffer.getvalue()

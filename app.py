@@ -10,7 +10,7 @@ from openai import OpenAI
 from pipeline.accent import OpenAIAudioAccentDetector
 from pipeline.audio_utils import validate_duration
 from pipeline.config import STORY_PROVIDER, get_secret
-from pipeline.errors import ValidationError
+from pipeline.errors import PipelineError
 from pipeline.orchestrator import run_pipeline
 from pipeline.story_gen import create_story_generator
 from pipeline.tts import ElevenLabsNarrationSynthesizer
@@ -25,13 +25,13 @@ st.title("StoryTeller")
 st.write("Upload a short picture-book PDF and a voice sample to generate a narrated story.")
 
 pdf_file = st.file_uploader("Picture-book PDF (about 4 pages)", type=["pdf"])
-voice_file = st.file_uploader("Voice sample (1-5 minutes)", type=["wav", "mp3", "m4a"])
+voice_file = st.file_uploader("Voice sample (1-5 minutes)", type=["wav", "mp3"])
 enable_sfx = st.checkbox("Include background sound effects", value=True)
 language = st.selectbox("Output language", ["English", "Mandarin"])
 
 if st.button("Generate story", type="primary", disabled=not (pdf_file and voice_file)):
-    pdf_bytes = pdf_file.read()
-    voice_bytes = voice_file.read()
+    pdf_bytes = pdf_file.getvalue()
+    voice_bytes = voice_file.getvalue()
 
     try:
         with st.status("Checking voice sample...", expanded=True) as status:
@@ -62,8 +62,9 @@ if st.button("Generate story", type="primary", disabled=not (pdf_file and voice_
                 accent_detector=accent_detector,
                 voice_cloner=voice_cloner,
                 narration_synthesizer=narration_synthesizer,
-                freesound_api_key=get_secret("FREESOUND_API_KEY"),
+                freesound_api_key=get_secret("FREESOUND_API_KEY") if enable_sfx else "",
                 sfx_cache_dir=SFX_CACHE_DIR,
+                on_progress=lambda msg: status.update(label=msg),
             )
             status.update(label="Done!", state="complete")
 
@@ -78,7 +79,7 @@ if st.button("Generate story", type="primary", disabled=not (pdf_file and voice_
             file_name="story.mp3",
             mime="audio/mp3",
         )
-    except ValidationError as exc:
+    except PipelineError as exc:
         st.error(str(exc))
     except Exception as exc:
         st.error(f"Generation failed: {exc}")
