@@ -1,4 +1,14 @@
+import base64
+
 _LANGUAGE_CODES = {"English": "en", "Mandarin": "zh"}
+
+
+class NarrationAudio:
+    def __init__(self, audio_bytes: bytes, characters, character_start_times_seconds, character_end_times_seconds):
+        self.audio_bytes = audio_bytes
+        self.characters = characters
+        self.character_start_times_seconds = character_start_times_seconds
+        self.character_end_times_seconds = character_end_times_seconds
 
 
 class ElevenLabsNarrationSynthesizer:
@@ -6,17 +16,17 @@ class ElevenLabsNarrationSynthesizer:
         self._client = client
         self._model_id = model_id
 
-    def synthesize(self, text: str, voice_id: str, style_description: str, language: str) -> bytes:
-        # style_description is intentionally not sent to the API: eleven_v3 treats
-        # bracketed text as short inline audio-tag cues (e.g. "[whispers]"), not a
-        # natural-language delivery description, so prepending a full sentence risks
-        # it being read aloud literally. Dynamic delivery instead comes from the
-        # [whisper]/[gasp]-style inline tags story_gen.py already embeds in the text.
-        chunks = self._client.text_to_speech.convert(
+    def synthesize_with_timestamps(self, text: str, voice_id: str, language: str) -> NarrationAudio:
+        response = self._client.text_to_speech.convert_with_timestamps(
             voice_id,
             text=text,
             model_id=self._model_id,
             output_format="mp3_44100_128",
             language_code=_LANGUAGE_CODES.get(language),
         )
-        return b"".join(chunks)
+        return NarrationAudio(
+            audio_bytes=base64.b64decode(response.audio_base_64),
+            characters=response.alignment.characters,
+            character_start_times_seconds=response.alignment.character_start_times_seconds,
+            character_end_times_seconds=response.alignment.character_end_times_seconds,
+        )

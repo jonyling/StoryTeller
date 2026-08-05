@@ -1,25 +1,27 @@
+import base64
 from unittest.mock import MagicMock
 
 from pipeline.tts import ElevenLabsNarrationSynthesizer
 
 
-def test_synthesize_joins_audio_chunks_and_passes_expected_params():
+def test_synthesize_with_timestamps_decodes_audio_and_returns_alignment():
     fake_client = MagicMock()
-    fake_client.text_to_speech.convert.return_value = iter([b"chunk1", b"chunk2"])
+    fake_response = MagicMock()
+    fake_response.audio_base_64 = base64.b64encode(b"fake-audio-bytes").decode("ascii")
+    fake_response.alignment.characters = ["H", "i"]
+    fake_response.alignment.character_start_times_seconds = [0.0, 0.1]
+    fake_response.alignment.character_end_times_seconds = [0.1, 0.2]
+    fake_client.text_to_speech.convert_with_timestamps.return_value = fake_response
     synthesizer = ElevenLabsNarrationSynthesizer(fake_client)
 
-    audio_bytes = synthesizer.synthesize(
-        text="Once upon a time...",
-        voice_id="voice-123",
-        style_description="warm and slow",
-        language="Mandarin",
-    )
+    result = synthesizer.synthesize_with_timestamps(text="Hi", voice_id="voice-123", language="Mandarin")
 
-    assert audio_bytes == b"chunk1chunk2"
-    args, kwargs = fake_client.text_to_speech.convert.call_args
+    assert result.audio_bytes == b"fake-audio-bytes"
+    assert result.characters == ["H", "i"]
+    assert result.character_start_times_seconds == [0.0, 0.1]
+    assert result.character_end_times_seconds == [0.1, 0.2]
+    args, kwargs = fake_client.text_to_speech.convert_with_timestamps.call_args
     assert args[0] == "voice-123"
-    # style_description is accepted by the signature but must not be prepended
-    # into the text sent to the API (see comment in tts.py for why).
-    assert kwargs["text"] == "Once upon a time..."
+    assert kwargs["text"] == "Hi"
     assert kwargs["model_id"] == "eleven_v3"
     assert kwargs["language_code"] == "zh"

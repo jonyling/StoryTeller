@@ -1,17 +1,21 @@
 # StoryTeller — PDF-to-Narrated-Story Pipeline: Design Spec
 
-**Date:** 2026-08-05
-**Status:** Approved for implementation planning
+**Date:** 2026-08-05 (original) — Section 3 onward revised same day after
+merging a teammate's UI design
+**Status:** Implemented
 **Scope:** POC for a live demo. Local, single-user Streamlit app.
 
 ## 1. Purpose
 
-A user uploads a short picture-book PDF (~4 images) and a voice sample, picks
-whether to include background sound effects, and picks an output language
-(English or Mandarin). The app generates a short story grounded in the images,
-clones the user's voice, and renders a single narrated audio file with
-dynamic prosody and optional ambience — in the chosen language, in the user's
-own cloned voice.
+A user uploads a short picture-book PDF (~4 images), a picture, or a camera
+snapshot, plus a voice sample; picks a visual theme and language (English/
+Mandarin — one control drives both UI copy and story language); and picks
+whether to include background ambience. The app generates a short story
+grounded in the images, breaks it into individual sentences (each with an
+invented or narrator `speaker`, and a fixed-taxonomy `emotion`), clones the
+user's voice, and plays the story back **one sentence at a time**, each with
+its own narration clip and an emotion-matched looping ambience track when
+enabled.
 
 ## 2. Key Constraints Discovered During Design
 
@@ -69,172 +73,340 @@ materially shape the architecture:
   observable effect on the output. **Decision: drop the accent-detection
   stage and `pipeline/accent.py` entirely.**
 
-## 3. High-Level Architecture
+## 3. UI Merge: Per-Sentence Architecture (Option 3a)
+
+A teammate independently designed and built a themed, fully-mocked Streamlit
+UI (4 visual themes × EN/ZH, three story sources, a voice picker, a
+sentence-by-sentence player) with two integration seams —
+`extract_pages_from_pdf()` (real `pypdf` text extraction) and
+`generate_mock_story()` (the mock to replace) — and this data contract:
+
+```
+list[{
+    "page": int,
+    "sentences": list[{
+        "text": str,           # may contain inline [whisper]/[gasp]-style tags
+        "speaker": str,        # "narrator" or an invented character name
+        "emotion": str,        # "angry" | "excited" | "sad" | "calm" | "neutral"
+        "pitch": int,          # 1-5, cosmetic (see below)
+        "volume": int,         # 1-5, cosmetic
+        "rate": int,           # 1-5, cosmetic
+        "audio_path": bytes,   # real narration clip for this sentence
+    }]
+}]
+```
+
+This is a fundamentally different granularity from what Section 1-2 originally
+assumed: **one narration clip per sentence**, with per-sentence emotion
+driving which ambience loop plays, rather than one story-wide narration +
+one story-wide mood. Reconciling this against a real backend had three
+options, worked through with the project owner before implementing:
+
+1. **Keep whole-story generation, flatten the UI down** to one shared audio
+   player — simplest, but drops the sentence-by-sentence experience the UI
+   was built for.
+2. **Full per-sentence architecture**: the LLM tags emotion per sentence
+   *and* ElevenLabs is called once per sentence, each independently tunable
+   via `voice_settings` from that sentence's `pitch`/`volume`/`rate`. Richest
+   possible result, but multiplies API calls (~15-20 per story, based on a
+   ~200-word budget at 8-15 words/sentence), which on Free/Starter/Creator
+   ElevenLabs tiers (2/3/5 concurrent request limits) turns one ~5-8s
+   narration call into several sequential batches, and compounds failure
+   risk to roughly a 1-in-6 chance *some* sentence fails per run even at a
+   generous 99%-per-call success rate — a real conflict with the "keep the
+   demo fast and reliable" priority.
+3. **Chosen: one synthesis call, sliced after the fact.** The vision LLM
+   still writes one flowing story, but returns it pre-split into sentences
+   with per-sentence `emotion` (LLM-authored, richer than keyword-matching)
+   instead of a whole-story `sfx_mood`. All sentences are joined into one
+   string and synthesized in **one** ElevenLabs call using
+   `convert_with_timestamps` (confirmed real: returns character-level
+   `start`/`end` times), then sliced into one clip per sentence locally via
+   `pipeline/audio_utils.py: slice_audio_by_sentences`. This preserves the
+   UI's per-sentence player using only one API call — the entire point of
+   this option — at the cost of not being able to independently tune each
+   sentence's vocal delivery (it's one continuous take, sliced, not N
+   distinct performances). `pitch`/`volume`/`rate` are therefore populated
+   from a fixed per-emotion lookup table (`_EMOTION_DSP_DEFAULTS`, matching
+   the UI's own `EMOTION_DSP_DEFAULTS`) rather than independently computed —
+   they're carried through the schema for UI compatibility but don't drive
+   real per-sentence audio DSP. This is the same category of accepted
+   simplification as the whole-story `tts_style_description` gap noted in
+   the original design (Section 5.1) — visible in the schema, not acted on.
+
+**Ambience** is handled the same way the UI already designed it: a separate,
+simultaneously-playing looping `<audio>` element per sentence (not mixed into
+the narration file), keyed by that sentence's `emotion`. This meant
+`pipeline/mixer.py` (the old whole-story mix-into-one-file approach) became
+dead code and was deleted — nothing merges ambience into the narration
+audio anymore.
+
+**Speaker names:** the vision LLM is asked to invent simple character names
+for identifiable figures in the images (e.g. "Ember" for a dragon) and use
+`"narrator"` for descriptive lines — a prompt change, not an architecture
+change, since `speaker` is a display label only; there is still exactly one
+cloned voice narrating the whole story.
+
+**Page grouping:** everything is returned under a single `page: 1` — the
+UI's rendering already flattens all pages into one continuous sentence list
+regardless of page number, so this isn't load-bearing, and our story is one
+flowing narrative rather than naturally one paragraph per source image.
+
+**PDF text-extraction fallback:** `extract_pages_from_pdf()` (the
+teammate's `pypdf`-based real text extraction + keyword emotion tagging) is
+kept as-is and tried first. It only succeeds for a PDF that already
+contains real embedded text — rare for an actual picture book, but a
+legitimate lighter-weight path when it applies (skips vision generation
+entirely, using the already-extracted text and keyword-tagged emotions
+directly). When it returns `None` (the normal picture-book case, no
+extractable text), the original raw PDF bytes are rasterized via
+`pipeline/pdf_ingest.py` and run through the full vision pipeline below.
+
+## 4. High-Level Architecture
 
 Single local Streamlit app (`streamlit run app.py`). One story processed per
 run; no background workers, job queues, or multi-user concurrency (local
 single-user POC).
 
 ```
-[Streamlit Form]
- PDF upload + voice sample upload + SFX toggle + language choice (EN/中文)
+[Streamlit UI: theme/language header, story source (PDF/Picture/Camera),
+ voice picker (own upload or built-in preset), ambience toggle, Generate]
         │
         ▼
-0. Validation          Page count sanity check on PDF; voice sample duration
-        │              checked against ElevenLabs' Instant Voice Cloning
-        │              requirement (~1-5 min) before any paid API call fires.
+0. Source resolution   PDF with real text → extract_pages_from_pdf() (pypdf +
+        │              keyword tagging), skip straight to step 4. Otherwise:
+        │              PDF rasterized to page images (pdf_ingest.py), or a
+        │              single Picture/Camera image opened directly.
+        ▼
+0.5 Validation          Voice sample duration checked against ElevenLabs'
+        │              Instant Voice Cloning requirement (~1-5 min) before
+        │              any paid API call fires.
         ▼
 ┌─────────────────────────── Stage 1 (parallel) ───────────────────────────┐
-│  1a. Vision → Story    Vision-LLM takes page images + language, returns   │
-│                        { story_text (with [whisper]/[gasp]-style tags),  │
-│                          sfx_mood, tts_style_description }               │
+│  1a. Vision → Story    Vision-LLM takes image(s) + language, returns a   │
+│                        list of sentences: { text (with [whisper]/[gasp]  │
+│                        tags), speaker, emotion }                        │
 │  1b. Voice Cloning     ElevenLabs Instant Voice Cloning registers the    │
 │                        voice sample → voice_id                          │
 └────────────────────────────────────────────────────────────────────────┘
         ▼
 ┌─────────────────────────── Stage 2 (parallel) ───────────────────────────┐
-│  2a. Narration Synth   ElevenLabs synthesize(story_text, voice_id,       │
-│                        style_description, language) → narration audio    │
-│  2b. SFX Fetch         (only if SFX enabled) Freesound search on         │
-│                        sfx_mood → cached preview clip                    │
+│  2a. Narration Synth   ONE ElevenLabs convert_with_timestamps call on    │
+│                        all sentences joined together → narration audio  │
+│                        + character-level alignment                      │
+│  2b. Ambience Fetch    (only if enabled) one Freesound fetch per         │
+│                        *distinct* emotion actually used in the story     │
 └────────────────────────────────────────────────────────────────────────┘
         ▼
-3. Mixing               Loop/trim SFX clip to narration length, overlay at
-        │                -18dB beneath narration (PyDub). Skipped (dry
-        │                narration only) if SFX disabled or fetch failed.
+3. Per-Sentence Slicing  slice_audio_by_sentences() locates each sentence's
+        │                text in the alignment (exact match → bracket-tag-
+        │                stripped match → heuristic fallback) and cuts one
+        │                clip per sentence from the single narration take.
         ▼
-[ Final MP3 ]  → st.audio() player + download button
+[ {page: 1, sentences: [...]} ]  → per-sentence player, one at a time,
+                                    with matching looping ambience if enabled
 ```
 
-Stage 1's two calls are independent of each other (each depends only on
-the original upload, not on another stage-1 output), and Stage 2's two calls
-are independent of each other — both stages run their calls concurrently via
-`concurrent.futures.ThreadPoolExecutor` since these are I/O-bound network
-calls. This is the primary lever for keeping demo wait time short: wall-clock
-per stage becomes roughly "slowest call in that stage" instead of "sum of all
-calls in that stage."
+Stage 1's two calls are independent of each other, and Stage 2's calls are
+independent of each other — both stages run concurrently via
+`concurrent.futures.ThreadPoolExecutor`. This is the primary lever for
+keeping demo wait time short: wall-clock per stage becomes roughly "slowest
+call in that stage" instead of "sum of all calls," and per-emotion ambience
+fetches (typically 1-5, one per distinct emotion, not per sentence) run
+alongside the one narration call rather than serially after it.
 
-Additional speed measures:
+Additional speed/UX measures:
 - Rasterized PDF page images are downscaled/compressed before being sent to
   the vision LLM (smaller upload, faster response).
-- `st.status()` / `st.progress()` shows live per-stage progress messages so
-  the wait reads as responsive during a live demo.
+- `run_pipeline`'s `on_progress` callback updates the UI's themed loading
+  placeholder live between stages, so the wait reads as responsive.
 
-## 4. Project Structure
+## 5. Project Structure
 
 ```
-app.py                  # Streamlit UI + orchestration (stage sequencing, thread pool)
+app.py                  # Streamlit UI (theme/i18n/CSS + real backend wiring)
 pipeline/
   pdf_ingest.py         # PDF -> list[PIL.Image], validation, downscaling
-  story_gen.py          # StoryGenerator interface + OpenAIStoryGenerator, ClaudeStoryGenerator
+  story_gen.py          # StoryGenerator interface + OpenAI/Claude/Gemini/Grok generators,
+                         # per-sentence contract (StorySentence: text/speaker/emotion)
   voice_clone.py        # VoiceCloner interface + ElevenLabsVoiceCloner
-  tts.py                # NarrationSynthesizer interface + ElevenLabsNarrationSynthesizer
+  tts.py                # NarrationSynthesizer interface + ElevenLabsNarrationSynthesizer,
+                         # convert_with_timestamps -> NarrationAudio (audio + alignment)
+  audio_utils.py        # duration validation + slice_audio_by_sentences
   sfx.py                # Freesound search/download + local disk cache
-  mixer.py              # PyDub: loop/trim/overlay
-  config.py             # loads secrets, resolves active provider classes
-assets/sfx_cache/        # gitignored, runtime-populated by sfx.py
+  orchestrator.py       # ties it all together, per-emotion ambience, no mixing
+  errors.py             # PipelineError / ValidationError hierarchy
+  config.py             # loads secrets, STORY_PROVIDER constant
 requirements.txt
 .streamlit/secrets.toml.example
 .gitignore
 ```
 
-## 5. Component Design
+`pipeline/mixer.py` (whole-story ambience mixing) and `pipeline/accent.py`
+(accent detection) were both built earlier in this project's history and
+later deleted once their approach was superseded — see Section 3 and
+Section 2's last bullet respectively.
 
-### 5.1 Story generation (`story_gen.py`)
+## 6. Component Design
 
-Interface: `StoryGenerator.generate(images, language) -> StoryResult(story_text, sfx_mood, tts_style_description)`.
+### 6.1 Story generation (`story_gen.py`)
 
-Two concrete implementations (`OpenAIStoryGenerator`, `ClaudeStoryGenerator`)
-wrap each provider's multimodal API with equivalent prompts: produce a short
-story directly in the requested output language, with embedded expressive
-tags (e.g. `[whisper]`, `[gasp]`), one SFX mood keyword, and a natural-language
-delivery-style description. Active provider is chosen by a constant in
-`config.py` (`STORY_PROVIDER = "openai" | "claude"`) — a code-level switch,
-not an end-user UI toggle. The delivery-style description is accepted by
-`NarrationSynthesizer.synthesize` for interface stability but is not
-currently forwarded to ElevenLabs (see 5.2) — dynamic delivery comes entirely
-from the inline `[whisper]`/`[gasp]`-style tags embedded directly in
-`story_text`, which `eleven_v3` natively interprets.
+Interface: `StoryGenerator.generate(images, language) -> StoryResult(sentences: list[StorySentence])`,
+where `StorySentence` has `text`, `speaker`, `emotion` (normalized to one of
+`{"angry", "excited", "sad", "calm", "neutral"}`, falling back to `"neutral"`
+for anything else the LLM returns — mirroring the UI's own keyword-tagger's
+fallback behavior).
 
-### 5.2 Voice cloning + narration synthesis (`voice_clone.py`, `tts.py`)
+Four concrete implementations (`OpenAIStoryGenerator`, `ClaudeStoryGenerator`,
+`GeminiStoryGenerator`, `GrokStoryGenerator`) wrap each provider's multimodal
+API with equivalent prompts: produce a short story (~200 words) directly in
+the requested output language, broken into sentences, each with inline
+`[whisper]`/`[gasp]`-style delivery tags where appropriate, an invented
+character name or `"narrator"` as speaker, and one fixed-taxonomy emotion.
+`GrokStoryGenerator` reuses the `openai` SDK pointed at xAI's
+OpenAI-compatible endpoint (`base_url="https://api.x.ai/v1"`) rather than a
+separate SDK — both it and `OpenAIStoryGenerator` share one internal
+`_generate_via_openai_compatible_chat` helper. `GeminiStoryGenerator` uses
+Google's `google-genai` SDK (`client.models.generate_content` with
+`types.Part.from_bytes` images and `response_mime_type="application/json"`).
+Active provider is chosen by `STORY_PROVIDER` in `config.py` — a code-level
+switch, not an end-user UI toggle. The EN/ZH UI language picker doubles as
+the story-language selector (`app.py: STORY_LANGUAGE = {"EN": "English", "ZH": "Mandarin"}`).
 
-Single backend for both languages: **ElevenLabs**. Confirmed via its Python
-SDK source:
+### 6.2 Voice cloning + narration synthesis (`voice_clone.py`, `tts.py`)
+
+Single backend for both languages: **ElevenLabs**.
 - `client.voices.ivc.create(name=..., files=[...]) -> AddVoiceIvcResponseModel`
-  with a `.voice_id` field — this is the real, working voice-cloning-from-a-
-  sample call (Hume has no equivalent public endpoint; see Section 2).
-- `client.text_to_speech.convert(voice_id, text=..., model_id="eleven_v3",
-  output_format=..., language_code=...) -> Iterator[bytes]` — synthesizes the
-  story text (with inline `[whisper]`/`[gasp]`-style tags, which `eleven_v3`
-  natively interprets) in the cloned voice. Returned as a byte-chunk
-  iterator; the wrapper joins it into a single `bytes` object.
-
-Interfaces (kept as interfaces, not just concrete functions, so a second
-backend could be added later without touching calling code — but only one
-implementation is built now, per YAGNI):
-- `VoiceCloner.clone(audio_bytes, name) -> voice_id`
-- `NarrationSynthesizer.synthesize(text, voice_id, style_description, language) -> audio_bytes`
+  clones a voice from the uploaded sample. `voice_clone.py` sniffs the
+  uploaded bytes' magic numbers (RIFF → wav, ID3/MPEG frame sync → mp3, else
+  a generic fallback) to label the upload correctly regardless of its real
+  format, since the file extension alone isn't trustworthy.
+- `client.text_to_speech.convert_with_timestamps(voice_id, text=..., model_id="eleven_v3", ...) -> AudioWithTimestampsResponse`
+  synthesizes **all of the story's sentences joined into one string** in a
+  single call, returning base64 audio plus character-level
+  `character_start_times_seconds`/`character_end_times_seconds` alignment.
+  `tts.py` decodes this into a `NarrationAudio(audio_bytes, characters,
+  character_start_times_seconds, character_end_times_seconds)`.
 
 `ElevenLabsVoiceCloner` / `ElevenLabsNarrationSynthesizer` are the only
-concrete implementations. `app.py` uses them directly for both English and
-Mandarin — there is no per-language backend selection or fallback logic.
+concrete implementations, used directly for both English and Mandarin —
+there is no per-language backend selection or fallback logic.
 
-### 5.3 SFX (`sfx.py`, `mixer.py`)
+### 6.3 Per-sentence audio slicing (`audio_utils.py`)
 
-`sfx.py` takes the vision-LLM's `sfx_mood` keyword, queries the Freesound API
-(requires a Freesound API key/account, noted in setup docs), and picks the
-top-rated result (sorted by `rating_desc`, no license filtering applied),
-downloads the preview mp3, and caches it on disk keyed by mood keyword so
-repeated moods across runs skip the network call. **Known POC-level gap:**
-because results aren't filtered by license, a shared or demo output could
-carry licensing obligations depending on which clip Freesound happens to
-return. `mixer.py` loops/trims the cached clip to the narration's length and
-overlays it at a fixed **-18dB** offset beneath the narration via PyDub. If
-Freesound returns no usable result, the dry narration is returned with an
-`st.warning` rather than failing the whole generation.
+`slice_audio_by_sentences(audio_bytes, characters, character_start_times_seconds,
+character_end_times_seconds, sentence_texts) -> list[bytes]` locates each
+sentence's text within the alignment's reconstructed character string and
+cuts a clip for it from the one synthesized take:
+1. Exact substring match (search starts from where the previous sentence's
+   match ended, to avoid false matches on repeated words).
+2. If not found, strip `[bracket tags]` and retry — ElevenLabs' alignment
+   may not preserve inline delivery-tag text verbatim.
+3. If still not found, fall back to a positional heuristic slice starting
+   at the current search cursor, rather than raising — one unmatched
+   sentence shouldn't break playback for the rest of the story. This is a
+   best-effort mechanism, not exact-alignment guaranteed; the manual
+   smoke-test checklist (README) includes explicitly listening through a
+   real generated story's sentences to confirm each clip matches its text,
+   since this is the one part of the pipeline unverifiable from unit tests
+   alone (they use synthetic, evenly-spaced timestamps).
 
-## 6. Configuration & Secrets
+### 6.4 SFX (`sfx.py`)
 
-API keys (OpenAI and/or Anthropic, ElevenLabs, Freesound) live in
+Unchanged internally from the original design — `fetch_ambience_clip(mood,
+api_key, cache_dir)` queries Freesound, picks the top-rated result (no
+license filtering — same known POC-level gap as before), downloads and
+caches by mood keyword. What changed is the call pattern: `orchestrator.py`
+calls it once per **distinct emotion** actually present in the story (via a
+fixed `_EMOTION_SFX_MOOD` map: angry→"thunderstorm", excited→"cheerful
+sparkle", sad→"gentle rain", calm→"flowing river", neutral→"quiet room
+tone"), not once per whole-story mood. There is no mixing step — the UI
+plays each fetched clip as its own simultaneous looping element per
+sentence, exactly as it was already designed to.
+
+### 6.5 UI (`app.py`)
+
+The teammate's themed UI (4 themes × EN/ZH via `st.segmented_control` bound
+directly to `st.session_state` keys — no `default=`/compare/`st.rerun()`
+pattern, since that has a stale-first-click bug; three story sources; a
+voice picker; sentence-by-sentence navigation with autoplay) is unchanged in
+its rendering, CSS, and session-state structure. The only real-backend
+touches:
+- `generate_mock_story()` — same two positional params (`pages`,
+  `voice_file`) and same `{page, sentences: [...]}` return schema, extended
+  with keyword-only params (`raw_source_bytes`, `language`, `enable_sfx`,
+  `on_progress`) to carry what the mock never needed. Real implementation
+  builds whichever provider client `STORY_PROVIDER` needs, validates voice
+  duration, and calls `run_pipeline`; any `PipelineError` or unexpected
+  exception is shown via `st.error` and falls back to `MOCK_STORY_PAGES`
+  (preserving the UI's existing `used_fallback` detection, which compares
+  by identity against that exact object).
+- The Generate button handler now also keeps the raw PDF bytes or opened
+  image around (previously discarded once `extract_pages_from_pdf()` had
+  been tried) so the real vision path has something to rasterize/read when
+  there's no extractable text.
+- The per-sentence ambience lookup now checks `st.session_state.ambience_by_emotion`
+  (populated by `generate_mock_story()` after a real run) before falling
+  back to the UI's static `SFX` file-path dict — fetched clips are raw
+  `bytes`, not file paths, and `st.audio()` accepts both. This has to be
+  `st.session_state`, not a plain reassigned module global: Streamlit
+  reruns the whole script top-to-bottom on every interaction, so a
+  module-level `SFX = {...}` reassignment made during generation would be
+  silently reset back to the static dict on the very next rerun (e.g.
+  clicking "Next"), while `session_state` persists correctly across reruns.
+
+## 7. Configuration & Secrets
+
+API keys (OpenAI and/or Anthropic and/or Gemini and/or xAI — whichever
+`STORY_PROVIDER` is active — plus ElevenLabs, Freesound) live in
 `.streamlit/secrets.toml` (gitignored), loaded via `st.secrets` in
 `config.py`. `.streamlit/secrets.toml.example` ships in the repo with
 placeholder values. The provider-selection constant `STORY_PROVIDER` also
 lives in `config.py`.
 
-## 7. Error Handling
+## 8. Error Handling
 
 Surfaced as `st.error`/`st.warning` in the UI, never raw stack traces:
 
-- PDF page-count sanity check and voice-sample duration check run locally
-  *before* any paid API call, with a clear message on the required range.
-- Every external API call (vision LLM, voice clone, TTS, Freesound) is
-  covered by one broad exception handler in `app.py`, which reports a
-  generic "Generation failed: {exc}" message rather than attributing the
-  failure to a specific step. This is an accepted simplification for this
-  POC, not a gap.
-- Freesound no-results is non-fatal (5.3).
-- There is no partial-result preservation across pipeline stages: a
-  later-stage failure (e.g. TTS failing after the story text was already
-  generated) does not display whatever succeeded earlier — the broad
-  handler above reports only the generic failure message. This is an
+- Voice-sample duration check runs locally *before* any paid API call, with
+  a clear message on the required range.
+- A malformed/unreadable PDF passed to `extract_pages_from_pdf()` is
+  treated the same as "no extractable text" (caught at the call site in
+  `app.py`) rather than crashing the page.
+- Every external API call in the real generation path is covered by one
+  broad exception handler in `generate_mock_story()`, which reports a
+  generic "Generation failed: {exc}" (or the specific message for a
+  `PipelineError`) and falls back to the mock story rather than attributing
+  the failure to a specific step or preserving partial results. This is an
   accepted simplification for this POC, not a gap.
+- Freesound no-results, or an outright fetch error, is non-fatal per
+  emotion — that emotion's sentences simply play without ambience.
+- Audio-slicing's positional-heuristic fallback (6.3) means a sentence
+  whose text can't be located in the alignment still gets *a* clip rather
+  than breaking the run, at the cost of that one clip's precision.
 
-## 8. Testing Approach
+## 9. Testing Approach
 
 Given this is a local single-user POC built on several paid external APIs,
 there is no full mocked-free integration test of the whole pipeline. Split:
 
 - **Unit tests (pytest, no network):** PDF rasterization count/order,
-  duration-validation boundaries, mood-keyword→search-query mapping,
-  mixing/looping length math in `mixer.py`. All provider classes are
-  faked/mocked here.
-- **Manual smoke-test checklist** (run once with real API keys before the
-  demo): one full English run end-to-end; one full Mandarin run end-to-end
-  (verifying ElevenLabs' cross-lingual clone-once-speak-any-language path);
-  one run each with SFX on/off; one deliberately-too-short voice sample to
-  confirm the validation message appears.
+  duration-validation boundaries, the four story generators' per-sentence
+  parsing (including emotion-normalization fallback), the audio-slicing
+  utility's exact/bracket-stripped/heuristic-fallback paths, the
+  timestamp-based narration synthesis wrapper, and the orchestrator's
+  per-distinct-emotion ambience fetching and non-fatal-failure behavior.
+  All provider classes are faked/mocked here.
+- **Manual smoke-test checklist** (see README): one full English run with a
+  real picture-book PDF; one full Mandarin run; one run each via
+  Picture/Camera source and via a real-text PDF (skips vision generation);
+  SFX on/off; a deliberately-too-short voice sample; and, specifically
+  because it can't be verified from unit tests (which use synthetic,
+  evenly-spaced timestamps), listening through a real generated story's
+  sentences to confirm each sliced clip actually matches its displayed
+  text.
 
-## 9. Out of Scope (for this POC)
+## 10. Out of Scope (for this POC)
 
 - Multi-user hosting, auth, concurrency/rate-limiting infrastructure.
 - End-user-facing LLM-provider selection UI (code-level constant only).
@@ -246,3 +418,11 @@ there is no full mocked-free integration test of the whole pipeline. Split:
 - Accent detection of any kind — dropped entirely per Section 2's findings
   (no channel exists to feed the hint to ElevenLabs). Could be revisited if
   ElevenLabs ships a natural-language delivery-description input.
+- True per-sentence audio DSP (independently-tuned pitch/volume/rate per
+  sentence via separate synthesis calls) — the explicitly rejected
+  higher-fidelity alternative to the one-call-plus-slicing approach in
+  Section 3, on cost/latency/reliability grounds. `pitch`/`volume`/`rate`
+  remain schema-only, populated from a fixed per-emotion lookup table.
+- License-aware SFX selection (favoring CC0/CC-BY Freesound results) — a
+  known gap carried over from the original design, unaffected by this
+  merge.
