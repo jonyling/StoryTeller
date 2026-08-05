@@ -32,10 +32,27 @@ materially shape the architecture:
 - **Hume Octave does not support Mandarin.** Verified against Hume's official
   docs (dev.hume.ai) and blog: Octave 2 supports Arabic, English, French,
   German, Hindi, Italian, Japanese, Korean, Portuguese, Russian, Spanish —
-  no Chinese variant, none announced as planned. Since the pipeline requires
-  an English/Mandarin toggle, **Mandarin output uses ElevenLabs** instead
-  (confirmed: supports Mandarin, Instant Voice Cloning from a 1-5 min sample,
-  and cross-lingual clone-once-speak-any-language).
+  no Chinese variant, none announced as planned.
+- **Hume's public API cannot clone a voice from an uploaded audio sample at
+  all**, for either language. Verified directly against the
+  `HumeAI/hume-python-sdk` source: the only voice-creation method,
+  `client.tts.voices.create()`, takes a `generation_id` from a prior TTS
+  synthesis call, never an audio file. `client.tts.convert_voice_file/json()`
+  ("Voice Conversion") does accept an `audio` parameter, but it re-renders
+  *existing* speech into an *already-existing* voice — the opposite
+  direction from cloning a new voice out of a sample. The "record or upload
+  → Create Voice" flow shown on Hume's web dashboard has no corresponding
+  public API route. **Decision: Hume is dropped from the narration/voice-
+  cloning role entirely. ElevenLabs is the sole narration backend for both
+  English and Mandarin** — confirmed via its Python SDK source
+  (`elevenlabs/elevenlabs-python`): `client.voices.ivc.create(name, files)`
+  clones a voice from an uploaded sample and returns a real `voice_id`, and
+  `client.text_to_speech.convert(voice_id, text, model_id="eleven_v3", ...)`
+  synthesizes it. The `eleven_v3` model additionally supports the inline
+  `[whisper]`/`[gasp]`/`[laughs]`-style delivery tags our story-generation
+  step produces, across 70+ languages including Mandarin — so the
+  expressive-tag design from the original guide still works, just through a
+  different provider than it assumed.
 
 ## 3. High-Level Architecture
 
@@ -49,9 +66,8 @@ single-user POC).
         │
         ▼
 0. Validation          Page count sanity check on PDF; voice sample duration
-        │              checked against the active backend's clone requirements
-        │              (Hume ~10s-3min / ElevenLabs ~1-5min) before any paid
-        │              API call fires.
+        │              checked against ElevenLabs' Instant Voice Cloning
+        │              requirement (~1-5 min) before any paid API call fires.
         ▼
 ┌─────────────────────────── Stage 1 (parallel) ───────────────────────────┐
 │  1a. Vision → Story    Vision-LLM takes page images + language, returns   │
@@ -59,14 +75,14 @@ single-user POC).
 │                          sfx_mood, tts_style_description }               │
 │  1b. Accent Detection  Audio-capable LLM listens to the voice sample,    │
 │                        returns { accent_label, detected_language }       │
-│  1c. Voice Cloning     Registers the voice sample with the selected      │
-│                        backend (Hume or ElevenLabs per language) → voice_id│
+│  1c. Voice Cloning     ElevenLabs Instant Voice Cloning registers the    │
+│                        voice sample → voice_id                          │
 └────────────────────────────────────────────────────────────────────────┘
         │  (cross-lingual hint: if detected_language != output language,
         │   accent_label is folded into tts_style_description)
         ▼
 ┌─────────────────────────── Stage 2 (parallel) ───────────────────────────┐
-│  2a. Narration Synth   backend.synthesize(story_text, voice_id,          │
+│  2a. Narration Synth   ElevenLabs synthesize(story_text, voice_id,       │
 │                        style_description, language) → narration audio    │
 │  2b. SFX Fetch         (only if SFX enabled) Freesound search on         │
 │                        sfx_mood → cached preview clip                    │
@@ -101,8 +117,8 @@ pipeline/
   pdf_ingest.py         # PDF -> list[PIL.Image], validation, downscaling
   story_gen.py          # StoryGenerator interface + OpenAIStoryGenerator, ClaudeStoryGenerator
   accent.py             # AccentDetector interface + OpenAIAudioAccentDetector
-  voice_clone.py        # VoiceCloner interface + HumeVoiceCloner, ElevenLabsVoiceCloner
-  tts.py                # NarrationSynthesizer interface + HumeNarrationSynthesizer, ElevenLabsNarrationSynthesizer
+  voice_clone.py        # VoiceCloner interface + ElevenLabsVoiceCloner
+  tts.py                # NarrationSynthesizer interface + ElevenLabsNarrationSynthesizer
   sfx.py                # Freesound search/download + local disk cache
   mixer.py              # PyDub: loop/trim/overlay
   config.py             # loads secrets, resolves active provider classes
@@ -136,37 +152,28 @@ Always runs once per submission (cheap, single call). Its result is only
 
 ### 5.3 Voice cloning + narration synthesis (`voice_clone.py`, `tts.py`)
 
-Common interfaces:
+Single backend for both languages: **ElevenLabs**. Confirmed via its Python
+SDK source:
+- `client.voices.ivc.create(name=..., files=[...]) -> AddVoiceIvcResponseModel`
+  with a `.voice_id` field — this is the real, working voice-cloning-from-a-
+  sample call (Hume has no equivalent public endpoint; see Section 2).
+- `client.text_to_speech.convert(voice_id, text=..., model_id="eleven_v3",
+  output_format=..., language_code=...) -> Iterator[bytes]` — synthesizes the
+  story text (with inline `[whisper]`/`[gasp]`-style tags, which `eleven_v3`
+  natively interprets) in the cloned voice. Returned as a byte-chunk
+  iterator; the wrapper joins it into a single `bytes` object.
+
+Interfaces (kept as interfaces, not just concrete functions, so a second
+backend could be added later without touching calling code — but only one
+implementation is built now, per YAGNI):
 - `VoiceCloner.clone(audio_bytes, name) -> voice_id`
 - `NarrationSynthesizer.synthesize(text, voice_id, style_description, language) -> audio_bytes`
 
-`HumeVoiceCloner` / `HumeNarrationSynthesizer` implement these via Hume's
-`create_custom_voice` + `tts.synthesize_json` (Octave). `ElevenLabsVoiceCloner`
-/ `ElevenLabsNarrationSynthesizer` implement the same interfaces via
-ElevenLabs' Instant Voice Cloning + multilingual TTS.
+`ElevenLabsVoiceCloner` / `ElevenLabsNarrationSynthesizer` are the only
+concrete implementations. `app.py` uses them directly for both English and
+Mandarin — there is no per-language backend selection or fallback logic.
 
-**Backend selection by language:**
-- Mandarin → ElevenLabs (only Mandarin-capable option of the two).
-- English → Hume first, with automatic fallback to ElevenLabs (see 5.4).
-
-No other pipeline code needs to know which concrete backend is active for a
-given run — `app.py` resolves it once per run and passes the resolved
-`VoiceCloner`/`NarrationSynthesizer` pair through.
-
-### 5.4 English fallback: Hume → ElevenLabs on quota exhaustion
-
-For the English path only: attempt Hume voice-clone + Octave TTS first. If
-Hume raises a quota/credit-exhausted error (rate-limit or billing error
-response) at either the cloning or synthesis call, the run transparently
-redoes **both** cloning and synthesis via ElevenLabs — a Hume `voice_id` and
-an ElevenLabs `voice_id` are not interchangeable, so the fallback can't apply
-mid-way through a single voice's lifecycle. A small `st.info("Switched to
-backup voice engine")` notes the switch. This is automatic-detection-only (no
-manual override toggle) — the app tries Hume and only falls back on an actual
-quota error. Mandarin has no further fallback since ElevenLabs is already its
-only backend among the two integrated here.
-
-### 5.5 SFX (`sfx.py`, `mixer.py`)
+### 5.4 SFX (`sfx.py`, `mixer.py`)
 
 `sfx.py` takes the vision-LLM's `sfx_mood` keyword, queries the Freesound API
 (requires a Freesound API key/account, noted in setup docs), picks a result
@@ -179,7 +186,7 @@ Freesound returns no usable result, the dry narration is returned with an
 
 ## 6. Configuration & Secrets
 
-API keys (OpenAI and/or Anthropic, Hume, ElevenLabs, Freesound) live in
+API keys (OpenAI and/or Anthropic, ElevenLabs, Freesound) live in
 `.streamlit/secrets.toml` (gitignored), loaded via `st.secrets` in
 `config.py`. `.streamlit/secrets.toml.example` ships in the repo with
 placeholder values. Provider-selection constants (`STORY_PROVIDER`,
@@ -194,7 +201,7 @@ Surfaced as `st.error`/`st.warning` in the UI, never raw stack traces:
 - Every external API call (vision LLM, accent LLM, voice clone, TTS,
   Freesound) is caught at its call site and reported with which specific
   step failed.
-- Freesound no-results is non-fatal (5.5).
+- Freesound no-results is non-fatal (5.4).
 - Each pipeline stage is wrapped so a later-stage failure preserves and still
   displays whatever succeeded earlier in the same run (e.g. the generated
   story text stays visible even if TTS later fails), instead of discarding
@@ -207,20 +214,20 @@ there is no full mocked-free integration test of the whole pipeline. Split:
 
 - **Unit tests (pytest, no network):** PDF rasterization count/order,
   duration-validation boundaries, mood-keyword→search-query mapping,
-  language→backend selection lookup, mixing/looping length math in
-  `mixer.py`. All provider classes are faked/mocked here.
+  mixing/looping length math in `mixer.py`. All provider classes are
+  faked/mocked here.
 - **Manual smoke-test checklist** (run once with real API keys before the
   demo): one full English run end-to-end; one full Mandarin run end-to-end
-  (verifying the ElevenLabs cross-lingual path); one run each with SFX
-  on/off; one deliberately-too-short voice sample to confirm the validation
-  message appears; one simulated Hume-quota-exhausted run to confirm the
-  English fallback path (can be forced by temporarily using an
-  already-exhausted/invalid Hume key).
+  (verifying ElevenLabs' cross-lingual clone-once-speak-any-language path);
+  one run each with SFX on/off; one deliberately-too-short voice sample to
+  confirm the validation message appears.
 
 ## 9. Out of Scope (for this POC)
 
 - Multi-user hosting, auth, concurrency/rate-limiting infrastructure.
 - End-user-facing LLM/accent-provider selection UI (code-level constants only).
-- Manual override toggle for the English TTS fallback.
-- Any TTS backend for Mandarin fallback (ElevenLabs is the sole Mandarin
-  backend; no further fallback exists if it fails).
+- Any fallback/backup TTS backend (ElevenLabs is the sole narration backend
+  for both languages; no further fallback exists if it fails).
+- Hume AI integration of any kind — dropped entirely per Section 2's
+  findings. Could be revisited if Hume ships a public audio-upload voice-
+  cloning endpoint in the future.
