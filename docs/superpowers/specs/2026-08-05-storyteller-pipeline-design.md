@@ -182,10 +182,13 @@ Mandarin — there is no per-language backend selection or fallback logic.
 ### 5.3 SFX (`sfx.py`, `mixer.py`)
 
 `sfx.py` takes the vision-LLM's `sfx_mood` keyword, queries the Freesound API
-(requires a Freesound API key/account, noted in setup docs), picks a result
-favoring CC0/CC-BY-licensed previews, downloads the preview mp3, and caches it
-on disk keyed by mood keyword so repeated moods across runs skip the network
-call. `mixer.py` loops/trims the cached clip to the narration's length and
+(requires a Freesound API key/account, noted in setup docs), and picks the
+top-rated result (sorted by `rating_desc`, no license filtering applied),
+downloads the preview mp3, and caches it on disk keyed by mood keyword so
+repeated moods across runs skip the network call. **Known POC-level gap:**
+because results aren't filtered by license, a shared or demo output could
+carry licensing obligations depending on which clip Freesound happens to
+return. `mixer.py` loops/trims the cached clip to the narration's length and
 overlays it at a fixed **-18dB** offset beneath the narration via PyDub. If
 Freesound returns no usable result, the dry narration is returned with an
 `st.warning` rather than failing the whole generation.
@@ -205,12 +208,16 @@ Surfaced as `st.error`/`st.warning` in the UI, never raw stack traces:
 - PDF page-count sanity check and voice-sample duration check run locally
   *before* any paid API call, with a clear message on the required range.
 - Every external API call (vision LLM, voice clone, TTS, Freesound) is
-  caught at its call site and reported with which specific step failed.
+  covered by one broad exception handler in `app.py`, which reports a
+  generic "Generation failed: {exc}" message rather than attributing the
+  failure to a specific step. This is an accepted simplification for this
+  POC, not a gap.
 - Freesound no-results is non-fatal (5.3).
-- Each pipeline stage is wrapped so a later-stage failure preserves and still
-  displays whatever succeeded earlier in the same run (e.g. the generated
-  story text stays visible even if TTS later fails), instead of discarding
-  everything.
+- There is no partial-result preservation across pipeline stages: a
+  later-stage failure (e.g. TTS failing after the story text was already
+  generated) does not display whatever succeeded earlier — the broad
+  handler above reports only the generic failure message. This is an
+  accepted simplification for this POC, not a gap.
 
 ## 8. Testing Approach
 
