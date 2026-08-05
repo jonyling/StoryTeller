@@ -53,6 +53,21 @@ materially shape the architecture:
   step produces, across 70+ languages including Mandarin — so the
   expressive-tag design from the original guide still works, just through a
   different provider than it assumed.
+- **Accent detection has no channel to actually steer ElevenLabs output, so
+  it's dropped.** The original rationale (from brainstorming) was
+  cross-lingual steering: detect the sample's accent so a hint like "speak
+  Mandarin with a Singaporean-English-influenced accent" could be fed to the
+  narration call, mirroring Hume's free-text `description` field. ElevenLabs'
+  `eleven_v3` has no equivalent natural-language delivery-description input —
+  its only text-embedded control is short bracketed audio-tag cues
+  (`[whispers]`, `[gasps]`), and a full accent-hint sentence risks being read
+  aloud verbatim if forced into that channel (confirmed as a real risk during
+  final review). Since ElevenLabs' Instant Voice Cloning already carries the
+  speaker's timbre across languages on its own (that's the whole basis for
+  picking it as the cross-lingual backend in the first place), a separate
+  accent-detection call bought nothing — it was a paid API call with no
+  observable effect on the output. **Decision: drop the accent-detection
+  stage and `pipeline/accent.py` entirely.**
 
 ## 3. High-Level Architecture
 
@@ -73,13 +88,9 @@ single-user POC).
 │  1a. Vision → Story    Vision-LLM takes page images + language, returns   │
 │                        { story_text (with [whisper]/[gasp]-style tags),  │
 │                          sfx_mood, tts_style_description }               │
-│  1b. Accent Detection  Audio-capable LLM listens to the voice sample,    │
-│                        returns { accent_label, detected_language }       │
-│  1c. Voice Cloning     ElevenLabs Instant Voice Cloning registers the    │
+│  1b. Voice Cloning     ElevenLabs Instant Voice Cloning registers the    │
 │                        voice sample → voice_id                          │
 └────────────────────────────────────────────────────────────────────────┘
-        │  (cross-lingual hint: if detected_language != output language,
-        │   accent_label is folded into tts_style_description)
         ▼
 ┌─────────────────────────── Stage 2 (parallel) ───────────────────────────┐
 │  2a. Narration Synth   ElevenLabs synthesize(story_text, voice_id,       │
@@ -95,7 +106,7 @@ single-user POC).
 [ Final MP3 ]  → st.audio() player + download button
 ```
 
-Stage 1's three calls are independent of each other (each depends only on
+Stage 1's two calls are independent of each other (each depends only on
 the original upload, not on another stage-1 output), and Stage 2's two calls
 are independent of each other — both stages run their calls concurrently via
 `concurrent.futures.ThreadPoolExecutor` since these are I/O-bound network
@@ -116,7 +127,6 @@ app.py                  # Streamlit UI + orchestration (stage sequencing, thread
 pipeline/
   pdf_ingest.py         # PDF -> list[PIL.Image], validation, downscaling
   story_gen.py          # StoryGenerator interface + OpenAIStoryGenerator, ClaudeStoryGenerator
-  accent.py             # AccentDetector interface + OpenAIAudioAccentDetector
   voice_clone.py        # VoiceCloner interface + ElevenLabsVoiceCloner
   tts.py                # NarrationSynthesizer interface + ElevenLabsNarrationSynthesizer
   sfx.py                # Freesound search/download + local disk cache
@@ -138,19 +148,15 @@ Two concrete implementations (`OpenAIStoryGenerator`, `ClaudeStoryGenerator`)
 wrap each provider's multimodal API with equivalent prompts: produce a short
 story directly in the requested output language, with embedded expressive
 tags (e.g. `[whisper]`, `[gasp]`), one SFX mood keyword, and a natural-language
-delivery-style description for the TTS call. Active provider is chosen by a
-constant in `config.py` (`STORY_PROVIDER = "openai" | "claude"`) — a
-code-level switch, not an end-user UI toggle.
+delivery-style description. Active provider is chosen by a constant in
+`config.py` (`STORY_PROVIDER = "openai" | "claude"`) — a code-level switch,
+not an end-user UI toggle. The delivery-style description is accepted by
+`NarrationSynthesizer.synthesize` for interface stability but is not
+currently forwarded to ElevenLabs (see 5.2) — dynamic delivery comes entirely
+from the inline `[whisper]`/`[gasp]`-style tags embedded directly in
+`story_text`, which `eleven_v3` natively interprets.
 
-### 5.2 Accent detection (`accent.py`)
-
-Interface: `AccentDetector.detect(audio_bytes) -> AccentResult(accent_label, detected_language)`,
-implemented via an audio-capable multimodal LLM (e.g. GPT-4o-audio-preview).
-Always runs once per submission (cheap, single call). Its result is only
-*used* — folded into `tts_style_description` as a steering hint — when
-`detected_language != output_language` (the cross-lingual case).
-
-### 5.3 Voice cloning + narration synthesis (`voice_clone.py`, `tts.py`)
+### 5.2 Voice cloning + narration synthesis (`voice_clone.py`, `tts.py`)
 
 Single backend for both languages: **ElevenLabs**. Confirmed via its Python
 SDK source:
@@ -173,7 +179,7 @@ implementation is built now, per YAGNI):
 concrete implementations. `app.py` uses them directly for both English and
 Mandarin — there is no per-language backend selection or fallback logic.
 
-### 5.4 SFX (`sfx.py`, `mixer.py`)
+### 5.3 SFX (`sfx.py`, `mixer.py`)
 
 `sfx.py` takes the vision-LLM's `sfx_mood` keyword, queries the Freesound API
 (requires a Freesound API key/account, noted in setup docs), picks a result
@@ -189,8 +195,8 @@ Freesound returns no usable result, the dry narration is returned with an
 API keys (OpenAI and/or Anthropic, ElevenLabs, Freesound) live in
 `.streamlit/secrets.toml` (gitignored), loaded via `st.secrets` in
 `config.py`. `.streamlit/secrets.toml.example` ships in the repo with
-placeholder values. Provider-selection constants (`STORY_PROVIDER`,
-`ACCENT_PROVIDER`) also live in `config.py`.
+placeholder values. The provider-selection constant `STORY_PROVIDER` also
+lives in `config.py`.
 
 ## 7. Error Handling
 
@@ -198,10 +204,9 @@ Surfaced as `st.error`/`st.warning` in the UI, never raw stack traces:
 
 - PDF page-count sanity check and voice-sample duration check run locally
   *before* any paid API call, with a clear message on the required range.
-- Every external API call (vision LLM, accent LLM, voice clone, TTS,
-  Freesound) is caught at its call site and reported with which specific
-  step failed.
-- Freesound no-results is non-fatal (5.4).
+- Every external API call (vision LLM, voice clone, TTS, Freesound) is
+  caught at its call site and reported with which specific step failed.
+- Freesound no-results is non-fatal (5.3).
 - Each pipeline stage is wrapped so a later-stage failure preserves and still
   displays whatever succeeded earlier in the same run (e.g. the generated
   story text stays visible even if TTS later fails), instead of discarding
@@ -225,9 +230,12 @@ there is no full mocked-free integration test of the whole pipeline. Split:
 ## 9. Out of Scope (for this POC)
 
 - Multi-user hosting, auth, concurrency/rate-limiting infrastructure.
-- End-user-facing LLM/accent-provider selection UI (code-level constants only).
+- End-user-facing LLM-provider selection UI (code-level constant only).
 - Any fallback/backup TTS backend (ElevenLabs is the sole narration backend
   for both languages; no further fallback exists if it fails).
 - Hume AI integration of any kind — dropped entirely per Section 2's
   findings. Could be revisited if Hume ships a public audio-upload voice-
   cloning endpoint in the future.
+- Accent detection of any kind — dropped entirely per Section 2's findings
+  (no channel exists to feed the hint to ElevenLabs). Could be revisited if
+  ElevenLabs ships a natural-language delivery-description input.
