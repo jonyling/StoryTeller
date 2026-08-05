@@ -3,5 +3,4 @@ __pycache__/
 .venv/
 venv/
 .streamlit/secrets.toml
-assets/sfx_cache/
 .pytest_cache/
