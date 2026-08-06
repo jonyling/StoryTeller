@@ -1129,7 +1129,7 @@ THEMES = {
         "audio_wrap_radius": "0 0 18px 18px",
         "audio_filter": "invert(92%) hue-rotate(180deg) contrast(.92) saturate(.6)",
         "disabled_ink": "#9A9384",
-        "success_bg": "unset", "success_ink": "unset",
+        "success_bg": "unset", "success_ink": "unset", "scheme": "dark",
         "wave_h": "26px", "wave_radius": "2px", "wave_op": ".55",
         "progress": "bars", "prog_h": "3px", "prog_radius": "2px", "prog_gap": "4px",
         "prog_track": "rgba(246,241,232,.10)",
@@ -1200,6 +1200,7 @@ THEMES = {
         "audio_filter": "none",
         "disabled_ink": "#5A5148",
         "success_bg": "#E6F4E9", "success_ink": "#1E5B32",
+        "scheme": "light",
         "wave_h": "30px", "wave_radius": "3px", "wave_op": ".85",
         "progress": "bars", "prog_h": "9px", "prog_radius": "5px", "prog_gap": "5px",
         "prog_track": "rgba(42,37,32,.12)",
@@ -1268,6 +1269,7 @@ THEMES = {
         "audio_filter": "none",
         "disabled_ink": "#3D4A63",
         "success_bg": "#E6F4E9", "success_ink": "#1E5B32",
+        "scheme": "light",
         "wave_h": "26px", "wave_radius": "2px", "wave_op": ".9",
         "progress": "dots", "prog_h": "14px", "prog_radius": "999px",
         "prog_gap": "7px", "prog_track": "#FFFFFF",
@@ -1336,6 +1338,7 @@ THEMES = {
         "audio_filter": "none",
         "disabled_ink": "#5C5175",
         "success_bg": "#E6F4E9", "success_ink": "#1E5B32",
+        "scheme": "light",
         "wave_h": "22px", "wave_radius": "3px", "wave_op": ".8",
         "progress": "track", "prog_h": "8px", "prog_radius": "5px",
         "prog_gap": "0", "prog_track": "#FFFFFF",
@@ -1404,6 +1407,13 @@ st.html(f"""
    even inside a style block's raw-text content, e.g. a stray angle-bracket
    pair in a comment). @import inside the style element sidesteps both. */
 @import url("https://fonts.googleapis.com/css2?family=Source+Serif+4:ital,opsz,wght@0,8..60,300..700;1,8..60,300..600&family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&family=Baloo+2:wght@400;500;600;700;800&family=Nunito:wght@400;600;700;800&family=Quicksand:wght@400;500;600;700&family=Noto+Sans+SC:wght@400;500;700;900&family=Noto+Serif+SC:wght@400;600;700&display=swap");
+/* Chrome picks native audio-element control icon colours (play triangle,
+   scrub thumb, volume, overflow menu) from color-scheme, not from our CSS —
+   that shadow-DOM panel ignores page styles entirely. Streamlit's base
+   theme leaves color-scheme:dark in effect everywhere, so light themes
+   got white-on-white invisible controls no CSS override could fix. */
+:root, html, body, .stApp, [data-testid="stAppViewContainer"]{{
+  color-scheme: {T['scheme']}; }}
 :root{{ --ink:{T['ink']}; --muted:{T['ink_muted']}; --faint:{T['ink_faint']};
         --hair:{T['hair']}; --step:8px; }}
 .stApp{{ background:{T['app_bg']}; }}
@@ -1731,14 +1741,8 @@ button[data-variant="segmented_control"][aria-checked="true"] *{{
    a 999px pill previously crushed the control panel down to a strip with
    no visible play triangle/scrubber/volume in the light themes. Border and
    background live on the wrapper container below instead. */
-audio[data-testid="stAudio"]{{ display:block !important;
-  width:100% !important; height:44px !important; border-radius:12px !important;
-  background:{T['surface']} !important; }}
-audio[data-testid="stAudio"]::-webkit-media-controls-panel{{
-  background-color:{T['surface']} !important; }}
-audio[data-testid="stAudio"]::-webkit-media-controls-current-time-display,
-audio[data-testid="stAudio"]::-webkit-media-controls-time-remaining-display{{
-  color:{T['ink']} !important; }}
+audio[data-testid="stAudio"]{{ width:100% !important; height:44px !important;
+  border-radius:12px !important; }}
 
 /* Themed shell every audio player sits inside — a real st.container(border=True)
    detected via :has(), not a hand-written div (those don't nest around
