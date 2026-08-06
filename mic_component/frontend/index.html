@@ -1,0 +1,420 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <style>
+    :root { color-scheme: dark; }
+    body {
+      margin: 0;
+      font: 13px/1.35 system-ui, sans-serif;
+      color: #e8e2d6;
+      background: transparent;
+    }
+    .box {
+      border: 1px solid rgba(246,241,232,.2);
+      border-radius: 10px;
+      padding: 10px 12px;
+    }
+    .row { display: flex; align-items: center; gap: 8px; margin-top: 8px; flex-wrap: wrap; }
+    select, button {
+      font: inherit;
+      border-radius: 6px;
+      border: 1px solid rgba(246,241,232,.25);
+      background: #1a1c22;
+      color: #e8e2d6;
+      padding: 6px 10px;
+    }
+    select { flex: 1; min-width: 160px; }
+    button { cursor: pointer; }
+    button.primary { background: #c45c48; border-color: #c45c48; color: #fff; }
+    button.danger { background: #555; border-color: #555; color: #fff; }
+    button:disabled { opacity: .45; cursor: not-allowed; }
+    #bar {
+      flex: 1; min-width: 120px; height: 12px;
+      background: rgba(246,241,232,.12); border-radius: 999px; overflow: hidden;
+    }
+    #fill { height: 100%; width: 0%; background: #7dcea0; }
+    #pct { width: 42px; text-align: right; font-variant-numeric: tabular-nums; }
+    #status { margin-top: 8px; opacity: .85; white-space: pre-wrap; }
+    #timer { font-variant-numeric: tabular-nums; opacity: .9; min-width: 48px; }
+  </style>
+</head>
+<body>
+  <div class="box">
+    <div><b>Mic check + record</b> — same device for both (fixes silent Streamlit recorder).</div>
+    <div class="row">
+      <select id="devices"></select>
+      <button id="listenBtn" type="button">Check level</button>
+      <button id="recBtn" class="primary" type="button">Record</button>
+      <span id="timer">00:00</span>
+    </div>
+    <div class="row">
+      <div id="bar"><div id="fill"></div></div>
+      <div id="pct">0%</div>
+    </div>
+    <div id="status">With headphones: pick External Mic / Realtek. Check level (bar must move), then Record.</div>
+    <div id="previewWrap" style="display:none;margin-top:10px;">
+      <audio id="previewAudio" controls style="width:100%;height:36px;"></audio>
+      <div id="previewHint" style="margin-top:6px;opacity:.8;font-size:12px;">
+        Preview above. Streamlit should show Send below — if not, click “Push to app”.
+      </div>
+      <button id="pushBtn" type="button" class="primary" style="margin-top:8px;width:100%;">Push to app</button>
+    </div>
+  </div>
+
+  <script>
+    // Minimal Streamlit component protocol (no bundler needed).
+    const Streamlit = {
+      setFrameHeight(height) {
+        window.parent.postMessage({
+          isStreamlitMessage: true,
+          type: "streamlit:setFrameHeight",
+          height,
+        }, "*");
+      },
+      setComponentValue(value) {
+        window.parent.postMessage({
+          isStreamlitMessage: true,
+          type: "streamlit:setComponentValue",
+          dataType: "json",
+          value,
+        }, "*");
+      },
+      setComponentReady() {
+        window.parent.postMessage({
+          isStreamlitMessage: true,
+          type: "streamlit:componentReady",
+          apiVersion: 1,
+        }, "*");
+      },
+    };
+
+    const devicesEl = document.getElementById("devices");
+    const fill = document.getElementById("fill");
+    const pct = document.getElementById("pct");
+    const status = document.getElementById("status");
+    const listenBtn = document.getElementById("listenBtn");
+    const recBtn = document.getElementById("recBtn");
+    const timerEl = document.getElementById("timer");
+    const previewWrap = document.getElementById("previewWrap");
+    const previewAudio = document.getElementById("previewAudio");
+    const pushBtn = document.getElementById("pushBtn");
+
+    let monitorStream = null;
+    let monitorCtx = null;
+    let monitorRaf = 0;
+    let mediaRecorder = null;
+    let recStream = null;
+    let chunks = [];
+    let recPeak = 0;
+    let recStartedAt = 0;
+    let timerIv = 0;
+    let lastPayload = null;
+    let lastBlobUrl = null;
+
+    function setStatus(msg) { status.textContent = msg; }
+
+    function bumpHeight() {
+      Streamlit.setFrameHeight(Math.max(document.body.scrollHeight, 220));
+    }
+
+    function showLocalPreview(blob, payload) {
+      lastPayload = payload;
+      if (lastBlobUrl) URL.revokeObjectURL(lastBlobUrl);
+      lastBlobUrl = URL.createObjectURL(blob);
+      previewAudio.src = lastBlobUrl;
+      previewWrap.style.display = "block";
+      bumpHeight();
+    }
+
+    function pushPayload(payload) {
+      // Unique take id every push — WebM headers make data_b64 prefixes collide
+      const stamped = Object.assign({}, payload, { take_id: Date.now() + "_" + Math.random().toString(36).slice(2) });
+      lastPayload = stamped;
+      Streamlit.setComponentValue(stamped);
+      setStatus(
+        "Sent " + Math.round((payload.bytes || 0) / 1024) + " KB to the app · peak " +
+        Math.round((payload.peak || 0) * 100) + "%. Look for the player / Send below."
+      );
+    }
+
+    function arrayBufferToBase64(buffer) {
+      let binary = "";
+      const bytes = new Uint8Array(buffer);
+      const chunk = 0x8000;
+      for (let i = 0; i < bytes.length; i += chunk) {
+        binary += String.fromCharCode.apply(null, bytes.subarray(i, i + chunk));
+      }
+      return btoa(binary);
+    }
+
+    function audioConstraints() {
+      const deviceId = devicesEl.value;
+      const base = {
+        echoCancellation: false,
+        noiseSuppression: false,
+        autoGainControl: true,
+      };
+      return deviceId
+        ? { audio: { ...base, deviceId: { exact: deviceId } } }
+        : { audio: base };
+    }
+
+    async function listDevices() {
+      try {
+        const tmp = await navigator.mediaDevices.getUserMedia({ audio: true });
+        tmp.getTracks().forEach((t) => t.stop());
+      } catch (e) {
+        setStatus(
+          "Mic blocked: " + e.message +
+          "\\nChrome padlock → Site settings → Microphone → Allow, then reload."
+        );
+        return;
+      }
+      const devices = await navigator.mediaDevices.enumerateDevices();
+      const allMics = devices.filter((d) => d.kind === "audioinput");
+      devicesEl.innerHTML = "";
+
+      // Hide Steam / virtual capture devices entirely — they record silence and
+      // confuse headphone users (Steam Streaming Microphone, VB-Cable, etc.).
+      const isVirtual = (label) =>
+        /steam|virtual|cable|vb-?audio|voicemeeter|obs virtual|nvidia broadcast|droidcam|iriun/i.test(
+          label || ""
+        );
+      const isPreferred = (label) =>
+        /external mic|headset|usb/i.test(label || "");
+      const isOk = (label) =>
+        /external mic|headset|realtek|usb|array/i.test(label || "");
+
+      const mics = allMics.filter((d) => !isVirtual(d.label));
+      const hidden = allMics.length - mics.length;
+
+      // Dedupe identical labels (Windows often lists the same Realtek twice).
+      const seenLabels = new Set();
+      const unique = [];
+      for (const d of mics) {
+        const label = d.label || d.deviceId;
+        const key = label.toLowerCase();
+        if (seenLabels.has(key)) continue;
+        seenLabels.add(key);
+        unique.push(d);
+      }
+
+      const ranked = unique
+        .map((d, i) => ({
+          d,
+          i,
+          label: d.label || ("Microphone " + (i + 1)),
+          preferred: isPreferred(d.label),
+          ok: isOk(d.label),
+        }))
+        .sort((a, b) => {
+          if (a.preferred !== b.preferred) return a.preferred ? -1 : 1;
+          if (a.ok !== b.ok) return a.ok ? -1 : 1;
+          return a.i - b.i;
+        });
+
+      if (!ranked.length) {
+        setStatus(
+          "No usable mic found" +
+            (hidden ? " (hid " + hidden + " virtual/Steam device(s))" : "") +
+            ". Plug in a headset / Realtek mic and reload."
+        );
+        return;
+      }
+
+      ranked.forEach((item) => {
+        const opt = document.createElement("option");
+        opt.value = item.d.deviceId;
+        opt.textContent = item.preferred
+          ? item.label + "  ✓ recommended"
+          : item.label;
+        devicesEl.appendChild(opt);
+      });
+      devicesEl.selectedIndex = 0;
+
+      setStatus(
+        ranked.length +
+          " mic(s)" +
+          (hidden ? " · hid " + hidden + " Steam/virtual" : "") +
+          ". Prefer External Mic. Check level = meter only (not playback). Record/Stop, then use the player below."
+      );
+    }
+
+    async function stopMonitor() {
+      if (monitorRaf) cancelAnimationFrame(monitorRaf);
+      monitorRaf = 0;
+      if (monitorStream) monitorStream.getTracks().forEach((t) => t.stop());
+      monitorStream = null;
+      if (monitorCtx) {
+        try { await monitorCtx.close(); } catch (e) {}
+      }
+      monitorCtx = null;
+      fill.style.width = "0%";
+      pct.textContent = "0%";
+      listenBtn.textContent = "Check level";
+    }
+
+    async function startMonitor() {
+      await stopMonitor();
+      try {
+        monitorStream = await navigator.mediaDevices.getUserMedia(audioConstraints());
+      } catch (e) {
+        setStatus("Could not open mic: " + e.message);
+        return;
+      }
+      monitorCtx = new (window.AudioContext || window.webkitAudioContext)();
+      const src = monitorCtx.createMediaStreamSource(monitorStream);
+      const analyser = monitorCtx.createAnalyser();
+      analyser.fftSize = 2048;
+      src.connect(analyser);
+      const data = new Uint8Array(analyser.fftSize);
+      listenBtn.textContent = "Stop check";
+      setStatus("Level check on… speak. Then Record/Stop (same mic). Playback is the player below — not this button.");
+
+      const tick = () => {
+        analyser.getByteTimeDomainData(data);
+        let peak = 0;
+        for (let i = 0; i < data.length; i++) {
+          const v = Math.abs(data[i] - 128) / 128;
+          if (v > peak) peak = v;
+        }
+        const p = Math.min(100, Math.round(peak * 140));
+        fill.style.width = p + "%";
+        pct.textContent = p + "%";
+        fill.style.background = p < 3 ? "#c45c48" : "#7dcea0";
+        monitorRaf = requestAnimationFrame(tick);
+      };
+      tick();
+    }
+
+    function fmt(ms) {
+      const s = Math.floor(ms / 1000);
+      const mm = String(Math.floor(s / 60)).padStart(2, "0");
+      const ss = String(s % 60).padStart(2, "0");
+      return mm + ":" + ss;
+    }
+
+    async function startRecord() {
+      if (mediaRecorder && mediaRecorder.state === "recording") {
+        mediaRecorder.stop();
+        return;
+      }
+      await stopMonitor();
+      chunks = [];
+      recPeak = 0;
+      try {
+        recStream = await navigator.mediaDevices.getUserMedia(audioConstraints());
+      } catch (e) {
+        setStatus("Record failed to open mic: " + e.message);
+        return;
+      }
+
+      // Live meter while recording
+      monitorCtx = new (window.AudioContext || window.webkitAudioContext)();
+      const src = monitorCtx.createMediaStreamSource(recStream);
+      const analyser = monitorCtx.createAnalyser();
+      analyser.fftSize = 2048;
+      src.connect(analyser);
+      const data = new Uint8Array(analyser.fftSize);
+      const tick = () => {
+        analyser.getByteTimeDomainData(data);
+        let peak = 0;
+        for (let i = 0; i < data.length; i++) {
+          const v = Math.abs(data[i] - 128) / 128;
+          if (v > peak) peak = v;
+        }
+        if (peak > recPeak) recPeak = peak;
+        const p = Math.min(100, Math.round(peak * 140));
+        fill.style.width = p + "%";
+        pct.textContent = p + "%";
+        fill.style.background = p < 3 ? "#c45c48" : "#7dcea0";
+        monitorRaf = requestAnimationFrame(tick);
+      };
+      tick();
+
+      const mime = MediaRecorder.isTypeSupported("audio/webm;codecs=opus")
+        ? "audio/webm;codecs=opus"
+        : (MediaRecorder.isTypeSupported("audio/webm") ? "audio/webm" : "");
+      mediaRecorder = mime ? new MediaRecorder(recStream, { mimeType: mime }) : new MediaRecorder(recStream);
+      mediaRecorder.ondataavailable = (ev) => {
+        if (ev.data && ev.data.size > 0) chunks.push(ev.data);
+      };
+      mediaRecorder.onstop = async () => {
+        if (timerIv) clearInterval(timerIv);
+        if (monitorRaf) cancelAnimationFrame(monitorRaf);
+        if (monitorCtx) {
+          try { await monitorCtx.close(); } catch (e) {}
+          monitorCtx = null;
+        }
+        if (recStream) recStream.getTracks().forEach((t) => t.stop());
+        recStream = null;
+        recBtn.textContent = "Record";
+        recBtn.classList.remove("danger");
+        recBtn.classList.add("primary");
+
+        const blob = new Blob(chunks, { type: mediaRecorder.mimeType || "audio/webm" });
+        const buf = await blob.arrayBuffer();
+        if (!buf.byteLength || recPeak < 0.02) {
+          setStatus(
+            "Recording was silent (peak " + Math.round(recPeak * 100) +
+            "%). Pick another mic in the dropdown, Check level again, then Record."
+          );
+          previewWrap.style.display = "none";
+          Streamlit.setComponentValue(null);
+          bumpHeight();
+          return;
+        }
+        const payload = {
+          mime: blob.type || "audio/webm",
+          data_b64: arrayBufferToBase64(buf),
+          peak: recPeak,
+          bytes: buf.byteLength,
+        };
+        showLocalPreview(blob, payload);
+        pushPayload(payload);
+      };
+
+      mediaRecorder.start(200);
+      recStartedAt = Date.now();
+      timerEl.textContent = "00:00";
+      timerIv = setInterval(() => {
+        timerEl.textContent = fmt(Date.now() - recStartedAt);
+      }, 250);
+      recBtn.textContent = "Stop";
+      recBtn.classList.remove("primary");
+      recBtn.classList.add("danger");
+      setStatus("Recording on the selected mic… speak clearly, then Stop (≥6s).");
+    }
+
+    listenBtn.addEventListener("click", () => {
+      if (monitorStream) stopMonitor();
+      else startMonitor();
+    });
+    recBtn.addEventListener("click", startRecord);
+    pushBtn.addEventListener("click", () => {
+      if (!lastPayload) {
+        setStatus("Nothing to push — Record first.");
+        return;
+      }
+      pushPayload(lastPayload);
+    });
+    devicesEl.addEventListener("change", () => {
+      stopMonitor();
+      setStatus("Mic changed. Click Check level to verify the bar moves, then Record.");
+    });
+
+    window.addEventListener("message", (event) => {
+      if (event.data?.type === "streamlit:render") {
+        Streamlit.setFrameHeight(document.body.scrollHeight);
+      }
+    });
+
+    listDevices().then(() => {
+      Streamlit.setComponentReady();
+      Streamlit.setFrameHeight(document.body.scrollHeight || 180);
+    });
+  </script>
+</body>
+</html>

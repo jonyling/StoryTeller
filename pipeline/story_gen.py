@@ -1,11 +1,15 @@
 import base64
 import io
 import json
+import re
 
 from google.genai import types as genai_types
 
+from pipeline.errors import PipelineError
+
 _LANGUAGE_NAMES = {"English": "English", "Mandarin": "Mandarin Chinese"}
 VALID_EMOTIONS = {"angry", "excited", "sad", "calm", "neutral"}
+_JSON_FENCE = re.compile(r"```(?:json)?\s*([\s\S]*?)\s*```", re.IGNORECASE)
 
 
 class StorySentence:
@@ -50,15 +54,69 @@ def _normalize_emotion(value: str) -> str:
     return value if value in VALID_EMOTIONS else "neutral"
 
 
+def _coerce_message_text(message) -> str | None:
+    """Normalize OpenAI-style message content (str | list | None) to a string."""
+    if message is None:
+        return None
+    content = getattr(message, "content", None)
+    if content is None and isinstance(message, dict):
+        content = message.get("content")
+    if isinstance(content, list):
+        parts = []
+        for part in content:
+            if isinstance(part, str):
+                parts.append(part)
+            elif isinstance(part, dict):
+                parts.append(part.get("text") or "")
+            else:
+                parts.append(getattr(part, "text", None) or "")
+        content = "\n".join(p for p in parts if p)
+    if isinstance(content, str):
+        content = content.strip()
+        return content or None
+    return None
+
+
 def _parse_story_payload(raw_json: str) -> StoryResult:
-    payload = json.loads(raw_json)
+    if raw_json is None or not str(raw_json).strip():
+        raise PipelineError(
+            "Vision story model returned empty content. Check OPENAI_API_KEY / "
+            "STORY_PROVIDER, model access (needs vision, e.g. gpt-4o), and that the "
+            "key is not rate-limited or content-filtered."
+        )
+    text = str(raw_json).strip()
+    fence = _JSON_FENCE.search(text)
+    if fence:
+        text = fence.group(1).strip()
+    try:
+        payload = json.loads(text)
+    except json.JSONDecodeError as exc:
+        # Last resort: first {...} blob
+        start, end = text.find("{"), text.rfind("}")
+        if start >= 0 and end > start:
+            try:
+                payload = json.loads(text[start : end + 1])
+            except json.JSONDecodeError:
+                raise PipelineError(
+                    f"Vision story model returned non-JSON text: {text[:240]!r}"
+                ) from exc
+        else:
+            raise PipelineError(
+                f"Vision story model returned non-JSON text: {text[:240]!r}"
+            ) from exc
+
+    sentences_raw = payload.get("sentences") if isinstance(payload, dict) else None
+    if not sentences_raw:
+        raise PipelineError(
+            f"Vision story JSON missing 'sentences': {str(payload)[:240]!r}"
+        )
     sentences = [
         StorySentence(
             text=item["text"],
             speaker=item["speaker"],
             emotion=_normalize_emotion(item["emotion"]),
         )
-        for item in payload["sentences"]
+        for item in sentences_raw
     ]
     return StoryResult(sentences)
 
@@ -71,17 +129,46 @@ def _generate_via_openai_compatible_chat(client, model: str, images, language: s
             "type": "image_url",
             "image_url": {"url": f"data:image/jpeg;base64,{encoded}"},
         })
-    response = client.chat.completions.create(
-        model=model,
-        messages=[{"role": "user", "content": content}],
-        response_format={"type": "json_object"},
-        max_tokens=1500,
-    )
-    return _parse_story_payload(response.choices[0].message.content)
+
+    def _call(*, use_json_object: bool):
+        kwargs = {
+            "model": model,
+            "messages": [{"role": "user", "content": content}],
+            "max_tokens": 1500,
+        }
+        if use_json_object:
+            kwargs["response_format"] = {"type": "json_object"}
+        return client.chat.completions.create(**kwargs)
+
+    try:
+        response = _call(use_json_object=True)
+    except Exception as exc:
+        # Some gateways reject response_format with vision — retry plain.
+        try:
+            response = _call(use_json_object=False)
+        except Exception:
+            raise PipelineError(f"Vision story API call failed ({model}): {exc}") from exc
+
+    if not getattr(response, "choices", None):
+        raise PipelineError(f"Vision story API returned no choices ({model}).")
+
+    choice = response.choices[0]
+    message = choice.message
+    text = _coerce_message_text(message)
+    if not text:
+        refusal = getattr(message, "refusal", None)
+        finish = getattr(choice, "finish_reason", None)
+        raise PipelineError(
+            f"Vision story model returned empty content ({model}). "
+            f"finish_reason={finish!r}, refusal={refusal!r}. "
+            "Confirm the key can call a vision chat model (gpt-4o / gpt-4o-mini)."
+        )
+    return _parse_story_payload(text)
+
 
 
 class OpenAIStoryGenerator:
-    def __init__(self, client, model: str = "gpt-4o"):
+    def __init__(self, client, model: str = "gpt-4o-mini"):
         self._client = client
         self._model = model
 

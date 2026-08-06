@@ -81,12 +81,13 @@ def test_run_pipeline_without_sfx(mock_fetch_ambience, tmp_path):
     assert sentences[0]["text"] == "Once upon a time."
     assert sentences[0]["speaker"] == "narrator"
     assert sentences[0]["emotion"] == "calm"
-    assert sentences[0]["pitch"] == 2
-    assert sentences[0]["volume"] == 2
+    # Narrator stays dry (pitch 3) — pitch-shifting XTTS sounds echoey/roomy.
+    assert sentences[0]["pitch"] == 3
+    assert sentences[0]["volume"] == 3
     assert sentences[0]["rate"] == 2
     assert sentences[0]["audio_path"]
     assert sentences[1]["emotion"] == "excited"
-    assert sentences[1]["pitch"] == 5
+    assert sentences[1]["pitch"] == 4
     assert sentences[1]["audio_path"]
     assert sentences[0]["audio_path"] != sentences[1]["audio_path"]
 
@@ -137,6 +138,78 @@ def test_run_pipeline_survives_ambience_fetch_error(mock_fetch_ambience, tmp_pat
 
 
 @patch("pipeline.orchestrator.fetch_ambience_clip")
+def test_run_pipeline_per_sentence_backend_skips_timestamp_slice(mock_fetch_ambience, tmp_path):
+    class PerSentenceSynth:
+        def synthesize_sentences(self, lines, voice_id, language):
+            assert voice_id == "voice-123"
+            assert language == "English"
+            assert len(lines) == 2
+            return [_silence_mp3_bytes(200), _silence_mp3_bytes(150)]
+
+    result = run_pipeline(
+        images=_sample_images(),
+        voice_bytes=_fake_voice_bytes(),
+        language="English",
+        enable_sfx=False,
+        story_generator=FakeStoryGenerator(),
+        voice_cloner=FakeVoiceCloner(),
+        narration_synthesizer=PerSentenceSynth(),
+        freesound_api_key="fake-key",
+        sfx_cache_dir=str(tmp_path),
+    )
+
+    assert "stage_direction" in result.pages[0]["sentences"][0]
+    assert result.theatre_script["schema_version"] == "theatre-v1"
+    assert len(result.pages[0]["sentences"]) == 2
+
+
+@patch("pipeline.orchestrator.fetch_ambience_clip")
+def test_run_pipeline_prebuilt_story_skips_vision_but_runs_tts(mock_fetch_ambience, tmp_path):
+    """Text-PDF path: sentences already extracted — must still synthesize audio."""
+
+    class TrackingStoryGen:
+        def __init__(self):
+            self.called = False
+
+        def generate(self, images, language):
+            self.called = True
+            raise AssertionError("vision story gen must not run for prebuilt_story")
+
+    class PerSentenceSynth:
+        def synthesize_sentences(self, lines, voice_id, language):
+            return [_silence_mp3_bytes(400), _silence_mp3_bytes(350)]
+
+    story_gen = TrackingStoryGen()
+    prebuilt = StoryResult(
+        sentences=[
+            StorySentence(text="Page one line.", speaker="narrator", emotion="calm"),
+            StorySentence(text="Page two line!", speaker="Ember", emotion="excited"),
+        ]
+    )
+
+    result = run_pipeline(
+        images=[],
+        voice_bytes=_fake_voice_bytes(),
+        language="English",
+        enable_sfx=False,
+        story_generator=story_gen,
+        voice_cloner=FakeVoiceCloner(),
+        narration_synthesizer=PerSentenceSynth(),
+        freesound_api_key="fake-key",
+        sfx_cache_dir=str(tmp_path),
+        prebuilt_story=prebuilt,
+        page_nums=[1, 2],
+    )
+
+    assert story_gen.called is False
+    assert len(result.pages) == 2
+    assert result.pages[0]["page"] == 1
+    assert result.pages[1]["page"] == 2
+    assert result.pages[0]["sentences"][0]["audio_path"]
+    assert result.pages[1]["sentences"][0]["audio_path"]
+
+
+@patch("pipeline.orchestrator.fetch_ambience_clip")
 def test_run_pipeline_reports_progress(mock_fetch_ambience, tmp_path):
     mock_fetch_ambience.return_value = _silence_mp3_bytes(500)
     narration_synth = FakeNarrationSynthesizer()
@@ -156,3 +229,4 @@ def test_run_pipeline_reports_progress(mock_fetch_ambience, tmp_path):
     )
 
     assert len(progress_messages) > 1
+    assert any("Theatre" in msg or "theatre" in msg.lower() or "Generating" in msg for msg in progress_messages)

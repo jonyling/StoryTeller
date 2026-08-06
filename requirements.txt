@@ -9,3 +9,11 @@ google-genai>=1.0
 elevenlabs>=2.0
 requests>=2.31
 pytest>=7.4
+# Free local voice clone (default TTS_BACKEND=xtts) — Havoc path
+coqui-tts>=0.27.0
+transformers>=4.46,<5
+soundfile
+librosa
+numpy
+# XTTS Mandarin (ZH) — Coqui raises ImportError without this
+pypinyin>=0.50

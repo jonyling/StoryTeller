@@ -1,3 +1,9 @@
+"""Narration synthesizers.
+
+- ``XTTSNarrationSynthesizer`` (default) lives in ``pipeline.xtts_backend``
+  and exposes ``synthesize_sentences`` (per-line, EN/ZH).
+- ``ElevenLabsNarrationSynthesizer`` below is the paid backup using one timed take.
+"""
 import base64
 
 _LANGUAGE_CODES = {"English": "en", "Mandarin": "zh"}
@@ -12,6 +18,8 @@ class NarrationAudio:
 
 
 class ElevenLabsNarrationSynthesizer:
+    """Paid backup: one ``eleven_v3`` call with character timestamps."""
+
     def __init__(self, client, model_id: str = "eleven_v3"):
         self._client = client
         self._model_id = model_id
@@ -30,3 +38,4 @@ class ElevenLabsNarrationSynthesizer:
             character_start_times_seconds=response.alignment.character_start_times_seconds,
             character_end_times_seconds=response.alignment.character_end_times_seconds,
         )
+

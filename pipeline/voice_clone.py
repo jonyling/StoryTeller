@@ -1,3 +1,10 @@
+"""Voice cloning backends.
+
+- ``XTTSVoiceCloner`` (default, free/local) lives in ``pipeline.xtts_backend``
+- ``ElevenLabsVoiceCloner`` below is the paid backup
+"""
+
+
 def _sniff_audio_filename_and_content_type(audio_bytes: bytes) -> tuple[str, str]:
     if audio_bytes[:4] == b"RIFF":
         return "voice_sample.wav", "audio/wav"
@@ -7,6 +14,8 @@ def _sniff_audio_filename_and_content_type(audio_bytes: bytes) -> tuple[str, str
 
 
 class ElevenLabsVoiceCloner:
+    """Paid Instant Voice Cloning backup."""
+
     def __init__(self, client):
         self._client = client
 

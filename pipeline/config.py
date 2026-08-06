@@ -13,9 +13,11 @@ class ConfigError(PipelineError):
 
 
 STORY_PROVIDER = os.environ.get("STORY_PROVIDER", "openai")
+# Default: free local XTTS (Havoc path). Set TTS_BACKEND=elevenlabs for paid backup.
+TTS_BACKEND = os.environ.get("TTS_BACKEND", "xtts").strip().lower()
 
 
-def get_secret(name: str) -> str:
+def get_secret(name: str, *, required: bool = True) -> str:
     if st is not None:
         try:
             if name in st.secrets and st.secrets[name]:
@@ -23,6 +25,6 @@ def get_secret(name: str) -> str:
         except Exception:
             pass
     value = os.environ.get(name)
-    if not value:
+    if not value and required:
         raise ConfigError(f"Missing required secret: {name}")
-    return value
+    return value or ""

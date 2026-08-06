@@ -14,6 +14,7 @@ import os
 import re
 import struct
 import tempfile
+from pathlib import Path
 import time
 
 import streamlit as st
@@ -24,29 +25,64 @@ from openai import OpenAI
 from PIL import Image
 from pypdf import PdfReader
 
-from pipeline.audio_utils import validate_duration
-from pipeline.config import STORY_PROVIDER, get_secret
+from pipeline.asr import transcribe_wav_bytes
+from pipeline.audio_utils import get_duration_seconds, validate_duration
+from pipeline.companion import ask_companion, append_to_canon, new_session
+from pipeline.companion import CompanionReasoner
+from pipeline.config import STORY_PROVIDER, TTS_BACKEND, get_secret
+from pipeline.continue_story import (
+    append_beat_page,
+    generate_next_beat,
+    narrate_sentences,
+    speak_reply,
+)
 from pipeline.errors import PipelineError
 from pipeline.orchestrator import run_pipeline
 from pipeline.pdf_ingest import extract_page_images
 from pipeline.story_gen import create_story_generator
+from pipeline.theatre import LLMTheatreAdapter, RuleBasedTheatreAdapter
 from pipeline.tts import ElevenLabsNarrationSynthesizer
 from pipeline.voice_clone import ElevenLabsVoiceCloner
+from pipeline.xtts_backend import (
+    XTTS_MAX_REF_SECONDS,
+    XTTS_MIN_REF_SECONDS,
+    XTTSNarrationSynthesizer,
+    XTTSVoiceCloner,
+)
+from mic_component import record_voice, recording_to_wav_bytes
 
 st.set_page_config(page_title="Context-Aware Storyteller", page_icon="📖",
                    layout="centered", initial_sidebar_state="collapsed")
 
 for k, v in {"theme": "Classic", "lang": "EN", "sfx": False, "story": None,
              "used_fallback": False, "source": "PDF", "illustration": None,
-             "voice_mode": "Default", "voice_preset": "warm",
+             "voice_mode": "Default", "voice_preset": "warm", "own_voice_method": "Upload",
              "idx": 0, "dir": "fwd", "autoplay": False,
-             "ambience_by_emotion": {}}.items():
+             "ambience_by_emotion": {},
+             "theatre_script": None,
+             "companion_session": None,
+             "companion_chat": [],
+             "recorded_voice_wav": None,
+             "full_story_audio": None,
+             "play_mode": "full",
+             "narrator_voice_bytes": None,
+             "companion_voice_pending": None,
+             "story_chapters": [],
+             "story_timeline": [],
+             "last_question_wav": None,
+             "pending_question_wav": None,
+             "pending_question_peak": 0.0,
+             "last_ask_sig": None}.items():
     st.session_state.setdefault(k, v)
 
-# Real generation config. Story language reuses the EN/ZH picker (see the
-# THEME/LANGUAGE/AMBIENCE PICKER section) rather than adding a separate control.
-MIN_VOICE_SECONDS = 60
-MAX_VOICE_SECONDS = 300
+# Real generation config. Story language reuses the EN/ZH picker.
+# XTTS (default): short refs OK. ElevenLabs backup: keep 60–300s IVC window.
+if TTS_BACKEND == "elevenlabs":
+    MIN_VOICE_SECONDS = 60
+    MAX_VOICE_SECONDS = 300
+else:
+    MIN_VOICE_SECONDS = XTTS_MIN_REF_SECONDS
+    MAX_VOICE_SECONDS = XTTS_MAX_REF_SECONDS
 SFX_CACHE_DIR = os.path.join(tempfile.gettempdir(), "storyteller_sfx_cache")
 STORY_LANGUAGE = {"EN": "English", "ZH": "Mandarin"}
 
@@ -130,12 +166,16 @@ EMOTION_KEYWORDS = {
 }
 
 EMOTION_DSP_DEFAULTS = {
-    "angry": {"pitch": 4, "volume": 5, "rate": 4},
-    "excited": {"pitch": 5, "volume": 4, "rate": 4},
-    "sad": {"pitch": 2, "volume": 2, "rate": 2},
-    "calm": {"pitch": 2, "volume": 2, "rate": 2},
+    "angry": {"pitch": 3, "volume": 5, "rate": 4},
+    "excited": {"pitch": 4, "volume": 4, "rate": 4},
+    "sad": {"pitch": 3, "volume": 2, "rate": 2},
+    "calm": {"pitch": 3, "volume": 3, "rate": 2},
     "neutral": {"pitch": 3, "volume": 3, "rate": 3},
 }
+
+# Prefer full sentences on the board. XTTS still has a ~250-char model limit;
+# long sentences are synthesized in internal chunks then stitched into one clip.
+_SENT_END = re.compile(r"(?<=[.!?。！？])(?:\s+|(?=[A-Z\"“‘]))")
 
 
 def tag_emotion(sentence_text: str) -> str:
@@ -148,22 +188,39 @@ def tag_emotion(sentence_text: str) -> str:
     return best_emotion if best_score > 0 else "neutral"
 
 
+def _split_into_sentences(text: str) -> list[str]:
+    """Split only on full-sentence punctuation (. ! ?), never on commas."""
+    text = " ".join((text or "").replace("\n", " ").split())
+    if not text:
+        return []
+    parts = _SENT_END.split(text)
+    return [p.strip() for p in parts if p and p.strip()]
+
+
 def extract_pages_from_pdf(pdf_file):
     """Extract real text from an uploaded PDF and tag each sentence by
     keyword match. Returns None if the PDF has no extractable text (e.g.
-    scanned/image-only pages), so the caller can fall back to mock data."""
-    reader = PdfReader(pdf_file)
+    scanned/image-only pages), so the caller can fall back to mock data.
+
+    Accepts bytes, a path, or a file-like object. Prefer bytes from
+    ``UploadedFile.getvalue()`` so the stream position cannot empty the read.
+    """
+    if isinstance(pdf_file, (bytes, bytearray)):
+        reader = PdfReader(io.BytesIO(pdf_file))
+    else:
+        if hasattr(pdf_file, "seek"):
+            try:
+                pdf_file.seek(0)
+            except Exception:
+                pass
+        reader = PdfReader(pdf_file)
     pages = []
     for page_num, pdf_page in enumerate(reader.pages, start=1):
         text = (pdf_page.extract_text() or "").strip()
         if not text:
             continue
-        raw_sentences = re.split(r"(?<=[.!?])\s+", text)
         sentences = []
-        for raw in raw_sentences:
-            cleaned = raw.strip()
-            if not cleaned:
-                continue
+        for cleaned in _split_into_sentences(text):
             emotion = tag_emotion(cleaned)
             sentences.append({
                 "text": cleaned,
@@ -176,13 +233,245 @@ def extract_pages_from_pdf(pdf_file):
     return pages or None
 
 
+def _build_full_story_wav(pages) -> bytes | None:
+    """Concatenate every sentence clip into one continuous story WAV."""
+    from pydub import AudioSegment
+
+    combined = AudioSegment.silent(duration=200)
+    added = 0
+    for page in pages or []:
+        for sent in page.get("sentences", []):
+            clip = sent.get("audio_path")
+            if not isinstance(clip, (bytes, bytearray)) or not clip:
+                continue
+            raw = bytes(clip)
+            try:
+                play = _for_browser_playback(raw) if raw[:4] == b"RIFF" else raw
+                seg = AudioSegment.from_file(io.BytesIO(play))
+            except Exception:
+                try:
+                    seg = AudioSegment.from_file(io.BytesIO(raw))
+                except Exception:
+                    continue
+            combined += seg + AudioSegment.silent(duration=420)
+            added += 1
+    if added == 0:
+        return None
+    out = io.BytesIO()
+    combined.export(out, format="wav")
+    return out.getvalue()
+
+
 def _read_voice_bytes(voice_file) -> bytes:
-    """`voice_file` is either an uploaded file (Own) or a path string to a
-    bundled preset (Default) — normalize both to raw bytes."""
+    """Normalize upload / recording / built-in path to raw audio bytes."""
     if hasattr(voice_file, "getvalue"):
         return voice_file.getvalue()
+    if hasattr(voice_file, "read"):
+        data = voice_file.read()
+        if hasattr(voice_file, "seek"):
+            try:
+                voice_file.seek(0)
+            except Exception:
+                pass
+        return data
     with open(voice_file, "rb") as f:
         return f.read()
+
+
+class _BytesVoice:
+    """File-like wrapper so the rest of the pipeline can treat recordings like uploads."""
+
+    def __init__(self, data: bytes, name: str = "recording.wav"):
+        self._data = data
+        self.name = name
+
+    def getvalue(self) -> bytes:
+        return self._data
+
+    def read(self, *args, **kwargs) -> bytes:
+        return self._data
+
+
+def _for_browser_playback(audio_bytes: bytes) -> bytes:
+    """Make clips headphone-safe for Chrome/Brave + Realtek.
+
+    Built-in / XTTS / mic clips are often mono @ 16–22 kHz. Speakers usually upmix;
+    many Realtek headphone paths play that as silence in Chromium <audio>.
+    Force stereo + 48 kHz for browser playback only (refs stay mono).
+    """
+    try:
+        from pydub import AudioSegment
+
+        seg = AudioSegment.from_file(io.BytesIO(audio_bytes))
+        if seg.channels == 1:
+            seg = seg.set_channels(2)
+        if seg.frame_rate != 48000:
+            seg = seg.set_frame_rate(48000)
+        # Slight gain so quiet mic takes aren’t near-inaudible on headphones
+        if seg.dBFS != float("-inf") and seg.dBFS < -22:
+            seg = seg.apply_gain(min(12.0, -18.0 - seg.dBFS))
+        out = io.BytesIO()
+        seg.export(out, format="wav")
+        return out.getvalue()
+    except Exception:
+        return audio_bytes
+
+
+def _st_play_wav(
+    wav_bytes: bytes,
+    *,
+    label: str = "Play",
+    download_name: str = "clip.wav",
+    key: str | None = None,
+) -> None:
+    """Brave/Chrome-friendly player: stereo/48k + file URL + MP3 + download."""
+    import streamlit.components.v1 as components
+
+    if not isinstance(wav_bytes, (bytes, bytearray)) or not wav_bytes:
+        return
+    play = _for_browser_playback(bytes(wav_bytes))
+    cache = Path(tempfile.gettempdir()) / "storyteller_play_cache"
+    cache.mkdir(parents=True, exist_ok=True)
+    safe_key = (key or download_name or "clip").replace("/", "_")[:48]
+    wav_path = cache / f"{safe_key}.wav"
+    wav_path.write_bytes(play)
+
+    # MP3 often plays in Brave when WAV does not
+    mp3_bytes = None
+    try:
+        from pydub import AudioSegment
+
+        seg = AudioSegment.from_file(io.BytesIO(play), format="wav")
+        buf = io.BytesIO()
+        seg.export(buf, format="mp3", bitrate="192k")
+        mp3_bytes = buf.getvalue()
+        (cache / f"{safe_key}.mp3").write_bytes(mp3_bytes)
+    except Exception:
+        mp3_bytes = None
+
+    st.caption(label)
+    if mp3_bytes:
+        st.audio(mp3_bytes, format="audio/mp3")
+    else:
+        st.audio(play, format="audio/wav")
+
+    # Isolated Blob player — another Brave path when Streamlit media is muted
+    b64 = base64.b64encode(mp3_bytes or play).decode("ascii")
+    mime = "audio/mpeg" if mp3_bytes else "audio/wav"
+    components.html(
+        f"""
+<!DOCTYPE html><html><body style="margin:0;background:transparent;">
+<audio id="a" controls preload="auto" style="width:100%;height:36px;"></audio>
+<script>
+(function(){{
+  const b64="{b64}";
+  const bin=atob(b64);
+  const bytes=new Uint8Array(bin.length);
+  for(let i=0;i<bin.length;i++) bytes[i]=bin.charCodeAt(i);
+  const a=document.getElementById("a");
+  a.src=URL.createObjectURL(new Blob([bytes],{{type:"{mime}"}}));
+  a.volume=1.0;
+}})();
+</script></body></html>
+""",
+        height=48,
+    )
+    st.download_button(
+        f"Download · {download_name.replace('.wav', '.mp3' if mp3_bytes else '.wav')}",
+        data=mp3_bytes or play,
+        file_name=download_name.replace(".wav", ".mp3") if mp3_bytes else download_name,
+        mime="audio/mpeg" if mp3_bytes else "audio/wav",
+        use_container_width=True,
+        key=f"dl_{safe_key}_{len(play)}",
+    )
+
+
+def _chapter_from_pages(pages, *, title: str) -> dict:
+    text = " ".join(
+        s.get("text", "")
+        for p in (pages or [])
+        for s in p.get("sentences", [])
+    )
+    audio = _build_full_story_wav(pages)
+    return {"title": title, "text": text, "audio": audio, "pages": pages}
+
+
+def _timeline_chapter(ch: dict) -> dict:
+    return {
+        "kind": "chapter",
+        "title": ch.get("title") or "Chapter",
+        "text": ch.get("text") or "",
+        "audio": ch.get("audio"),
+    }
+
+
+def _append_timeline(event: dict) -> None:
+    tl = list(st.session_state.get("story_timeline") or [])
+    tl.append(event)
+    st.session_state.story_timeline = tl
+
+
+def _ensure_story_timeline() -> list:
+    """One chronological feed: chapters + Q&A + continues in the order they happened."""
+    tl = list(st.session_state.get("story_timeline") or [])
+    if tl:
+        return tl
+    # Migrate older sessions that only had chapters + companion_chat
+    migrated: list[dict] = []
+    for ch in st.session_state.get("story_chapters") or []:
+        migrated.append(_timeline_chapter(ch))
+    for turn in st.session_state.get("companion_chat") or []:
+        text = turn.get("text") or ""
+        if text.startswith("**Continued story**"):
+            continue  # already represented as a chapter
+        migrated.append(
+            {
+                "kind": turn.get("role") or "assistant",
+                "text": text,
+                "audio": turn.get("audio"),
+            }
+        )
+    st.session_state.story_timeline = migrated
+    return migrated
+
+
+def _preview_wav_bytes(wav_bytes: bytes, *, peak: float) -> None:
+    """Show an audible preview of a WAV (built-in, upload, or recording)."""
+    duration_s = max(0.01, len(wav_bytes) / (16000 * 2))  # rough for mono 16-bit 16k
+    try:
+        from pydub import AudioSegment
+
+        seg = AudioSegment.from_file(io.BytesIO(wav_bytes), format="wav")
+        duration_s = len(seg) / 1000.0
+        peak = max(peak, float(seg.max) / float(seg.max_possible_amplitude or 1))
+    except Exception:
+        pass
+
+    level_pct = int(round(peak * 100))
+    st.caption(
+        f"Preview · {duration_s:.1f}s · level {level_pct}% · {len(wav_bytes)} bytes "
+        f"(playback = stereo/48k for headphones)"
+    )
+    if peak < 0.02:
+        st.error(
+            "That recording looks nearly silent. In the mic panel above, pick your Realtek/"
+            "headset mic, click Listen (bar must move), then Record/Stop on that same device."
+        )
+        return
+
+    play_bytes = _for_browser_playback(wav_bytes)
+    preview_dir = Path(tempfile.gettempdir()) / "storyteller_voice_preview"
+    preview_dir.mkdir(parents=True, exist_ok=True)
+    preview_path = preview_dir / "latest_preview.wav"
+    preview_path.write_bytes(play_bytes)
+    st.audio(str(preview_path), format="audio/wav")
+    st.download_button(
+        "Download preview WAV",
+        data=wav_bytes,
+        file_name="voice_preview.wav",
+        mime="audio/wav",
+        use_container_width=True,
+    )
 
 
 def _build_story_provider_client():
@@ -201,61 +490,294 @@ def _build_story_provider_client():
     raise PipelineError(f"Unknown STORY_PROVIDER: {STORY_PROVIDER!r}")
 
 
-def generate_mock_story(pages, voice_file, *, raw_source_bytes, language, enable_sfx,
-                         on_progress=None):
-    """Real pipeline call. `pages` is either:
-    - a list of already-tagged page dicts, from extract_pages_from_pdf() (a
-      PDF that already had real embedded text) — used directly, no vision
-      call needed, exactly like the mock's fast path.
-    - None (a PDF with no extractable text — the normal picture-book case)
-      or a list holding one raw uploaded image (Picture/Camera) — in both
-      cases `raw_source_bytes` carries what's needed for real vision
-      generation: PDF bytes to rasterize, or a single already-opened image.
+def _build_tts_backends():
+    """Default: free local XTTS (EN+ZH). Backup: ElevenLabs when TTS_BACKEND=elevenlabs."""
+    if TTS_BACKEND == "elevenlabs":
+        client = ElevenLabs(api_key=get_secret("ELEVENLABS_API_KEY"))
+        return ElevenLabsVoiceCloner(client), ElevenLabsNarrationSynthesizer(client)
+    return XTTSVoiceCloner(), XTTSNarrationSynthesizer()
 
-    Clones the voice from `voice_file`, runs vision story generation + voice
-    cloning + narration synthesis + per-sentence slicing + per-emotion
-    ambience fetch, and returns pages in the same {page, sentences: [...]}
-    schema, each sentence now carrying real per-sentence audio bytes as
-    `audio_path` (Streamlit's st.audio() accepts raw bytes, not just a path).
-    """
-    if pages and isinstance(pages[0], dict) and "sentences" in pages[0]:
-        return pages
+
+def _build_theatre_adapter():
+    """Rule-based theatre always; optionally polish stage directions via OpenAI-compatible API."""
+    base = RuleBasedTheatreAdapter()
+    try:
+        if STORY_PROVIDER in ("openai", "grok"):
+            if STORY_PROVIDER == "openai":
+                client = OpenAI(api_key=get_secret("OPENAI_API_KEY"))
+            else:
+                client = OpenAI(api_key=get_secret("XAI_API_KEY"), base_url="https://api.x.ai/v1")
+            return LLMTheatreAdapter(client, fallback=base)
+    except Exception:
+        pass
+    return base
+
+
+def _openai_compatible_client():
+    if STORY_PROVIDER == "grok":
+        return OpenAI(api_key=get_secret("XAI_API_KEY"), base_url="https://api.x.ai/v1"), "grok-2-latest"
+    return OpenAI(api_key=get_secret("OPENAI_API_KEY")), "gpt-4o-mini"
+
+
+def _ensure_companion_session(heard_index: int):
+    session = st.session_state.companion_session
+    if session is None:
+        session = new_session(
+            st.session_state.story, language=STORY_LANGUAGE[LANG], book_id="storyteller"
+        )
+        st.session_state.companion_session = session
+    session.advance_to(heard_index)
+    return session
+
+
+def _speak_companion_answer(answer: str) -> bytes | None:
+    voice_bytes = st.session_state.get("narrator_voice_bytes")
+    if not voice_bytes or not answer:
+        return None
+    try:
+        voice_cloner, narration_synthesizer = _build_tts_backends()
+        raw = speak_reply(
+            answer,
+            voice_bytes=voice_bytes,
+            language=STORY_LANGUAGE[LANG],
+            voice_cloner=voice_cloner,
+            narration_synthesizer=narration_synthesizer,
+        )
+        return _for_browser_playback(raw) if raw and raw[:4] == b"RIFF" else raw
+    except Exception as exc:
+        st.warning(f"Could not speak Companion reply: {exc}")
+        return None
+
+
+def _handle_companion_question(
+    question: str, *, heard_index: int, question_audio: bytes | None = None
+) -> None:
+    q = (question or "").strip()
+    if not q:
+        return
+    _ensure_story_timeline()
+    session = _ensure_companion_session(heard_index)
+    q_play = None
+    if isinstance(question_audio, (bytes, bytearray)) and question_audio:
+        raw = bytes(question_audio)
+        q_play = _for_browser_playback(raw) if raw[:4] == b"RIFF" else raw
+    user_turn = {"role": "user", "text": q, "audio": q_play}
+    st.session_state.companion_chat.append(user_turn)
+    _append_timeline({"kind": "user", "text": q, "audio": q_play})
 
     try:
-        if isinstance(raw_source_bytes, list):
-            images = raw_source_bytes
-        else:
-            images = extract_page_images(raw_source_bytes)
+        client, model = _openai_compatible_client()
+        answer = ask_companion(session, q, CompanionReasoner(client, model=model))
+    except Exception as exc:
+        answer = (
+            f"(Companion unavailable: {exc}) Try again once an OpenAI/xAI key is set. "
+            "You can still keep listening to the story."
+        )
+    audio = _speak_companion_answer(answer)
+    asst_turn = {"role": "assistant", "text": answer, "audio": audio}
+    st.session_state.companion_chat.append(asst_turn)
+    _append_timeline({"kind": "assistant", "text": answer, "audio": audio})
 
+
+def _concat_wav_clips(clips: list[bytes], *, gap_ms: int = 400) -> bytes | None:
+    """Join sentence WAVs for Companion playback of a full continued beat."""
+    from pydub import AudioSegment
+
+    combined = AudioSegment.silent(duration=80)
+    added = 0
+    for raw in clips:
+        if not isinstance(raw, (bytes, bytearray)) or not raw:
+            continue
+        data = bytes(raw)
+        try:
+            play = _for_browser_playback(data) if data[:4] == b"RIFF" else data
+            seg = AudioSegment.from_file(io.BytesIO(play))
+        except Exception:
+            continue
+        combined += seg + AudioSegment.silent(duration=gap_ms)
+        added += 1
+    if added == 0:
+        return None
+    out = io.BytesIO()
+    combined.export(out, format="wav")
+    return out.getvalue()
+
+
+def _continue_story_beat(*, heard_index: int) -> None:
+    voice_bytes = st.session_state.get("narrator_voice_bytes")
+    if not voice_bytes:
+        st.error("No narrator voice in session — Generate a story first with a voice selected.")
+        return
+    client, model = _openai_compatible_client()
+    with st.status("Continuing the story…", expanded=True) as status:
+        status.update(label="Writing the next beat…", state="running")
+        sentences = generate_next_beat(
+            client,
+            st.session_state.story,
+            language=STORY_LANGUAGE[LANG],
+            model=model if STORY_PROVIDER != "grok" else "grok-2-latest",
+        )
+        status.update(label="Narrating with your voice…", state="running")
+        voice_cloner, narration_synthesizer = _build_tts_backends()
+        sentence_dicts = narrate_sentences(
+            sentences,
+            voice_bytes=voice_bytes,
+            language=STORY_LANGUAGE[LANG],
+            voice_cloner=voice_cloner,
+            narration_synthesizer=narration_synthesizer,
+        )
+        pages = append_beat_page(st.session_state.story, sentence_dicts)
+        st.session_state.story = pages
+        st.session_state.full_story_audio = _build_full_story_wav(pages)
+        page_no = pages[-1]["page"]
+        session = _ensure_companion_session(heard_index)
+        append_to_canon(session, sentence_dicts, page_no=page_no)
+        preview = " ".join(s["text"] for s in sentence_dicts)
+
+        # Play the FULL beat (all sentence clips), not a truncated single speak_reply.
+        # speak_reply caps at ~220 chars and was cutting mid-paragraph.
+        beat_clips = [s.get("audio_path") for s in sentence_dicts if s.get("audio_path")]
+        beat_wav = _concat_wav_clips(beat_clips)
+        lead = speak_reply(
+            "Here's what happens next.",
+            voice_bytes=voice_bytes,
+            language=STORY_LANGUAGE[LANG],
+            voice_cloner=voice_cloner,
+            narration_synthesizer=narration_synthesizer,
+        )
+        parts = []
+        if lead:
+            parts.append(lead)
+        if beat_wav:
+            parts.append(beat_wav)
+        audio = _concat_wav_clips(parts, gap_ms=250) if parts else None
+        if audio and audio[:4] == b"RIFF":
+            audio = _for_browser_playback(audio)
+
+        # Append once to chapter list + chronological timeline (not also as chat spam)
+        chapters = list(st.session_state.get("story_chapters") or [])
+        n = len(chapters) + 1
+        ch = {
+            "title": f"Chapter {n} — Continued",
+            "text": preview,
+            "audio": beat_wav if beat_wav else audio,
+            "pages": [pages[-1]],
+        }
+        chapters.append(ch)
+        st.session_state.story_chapters = chapters
+        _ensure_story_timeline()
+        _append_timeline(_timeline_chapter(ch))
+        status.update(label="Next beat ready — added below in order", state="complete")
+
+
+def generate_mock_story(pages, voice_file, *, raw_source_bytes, language, enable_sfx,
+                         on_progress=None):
+    """Real pipeline call.
+
+    - Text-PDF pages: skip vision, still run theatre + XTTS/ElevenLabs on those sentences.
+    - Image / scanned PDF: vision story gen, then the same narration path.
+    """
+    from pipeline.story_gen import StoryResult, StorySentence
+
+    try:
         voice_bytes = _read_voice_bytes(voice_file)
         validate_duration(voice_bytes, MIN_VOICE_SECONDS, MAX_VOICE_SECONDS)
+        voice_cloner, narration_synthesizer = _build_tts_backends()
+        theatre_adapter = _build_theatre_adapter()
 
-        client_kwarg_name, story_client = _build_story_provider_client()
-        story_generator = create_story_generator(STORY_PROVIDER, **{client_kwarg_name: story_client})
-        elevenlabs_client = ElevenLabs(api_key=get_secret("ELEVENLABS_API_KEY"))
+        prebuilt_story = None
+        page_nums = None
+        images = None
+        story_generator = None
+
+        if pages and isinstance(pages[0], dict) and "sentences" in pages[0]:
+            sentences = []
+            page_nums = []
+            for page in pages:
+                page_no = int(page.get("page", 1))
+                for item in page.get("sentences", []):
+                    sentences.append(
+                        StorySentence(
+                            text=item.get("text", ""),
+                            speaker=item.get("speaker", "narrator"),
+                            emotion=item.get("emotion", "neutral"),
+                        )
+                    )
+                    page_nums.append(page_no)
+            if not sentences:
+                raise PipelineError("No sentences extracted from the PDF.")
+            prebuilt_story = StoryResult(sentences)
+            # Text PDF may be EN or ZH; align to UI language before theatre/TTS.
+            from pipeline.translate import story_needs_translation, translate_story_result
+
+            if story_needs_translation(sentences, language):
+                label = "Mandarin" if language == "Mandarin" else "English"
+                if on_progress:
+                    on_progress(f"Translating story to {label}…")
+                client, model = _openai_compatible_client()
+                if STORY_PROVIDER == "grok":
+                    model = "grok-2-latest"
+                prebuilt_story = translate_story_result(
+                    client,
+                    prebuilt_story,
+                    target_language=language,
+                    model=model,
+                )
+            if on_progress:
+                on_progress("Narrating extracted PDF text with your voice…")
+        else:
+            if isinstance(raw_source_bytes, list):
+                images = raw_source_bytes
+            else:
+                images = extract_page_images(raw_source_bytes)
+            client_kwarg_name, story_client = _build_story_provider_client()
+            story_generator = create_story_generator(
+                STORY_PROVIDER, **{client_kwarg_name: story_client}
+            )
 
         result = run_pipeline(
-            images=images,
+            images=images or [],
             voice_bytes=voice_bytes,
             language=language,
             enable_sfx=enable_sfx,
             story_generator=story_generator,
-            voice_cloner=ElevenLabsVoiceCloner(elevenlabs_client),
-            narration_synthesizer=ElevenLabsNarrationSynthesizer(elevenlabs_client),
-            freesound_api_key=get_secret("FREESOUND_API_KEY") if enable_sfx else "",
+            voice_cloner=voice_cloner,
+            narration_synthesizer=narration_synthesizer,
+            theatre_adapter=theatre_adapter,
+            prebuilt_story=prebuilt_story,
+            page_nums=page_nums,
+            freesound_api_key=get_secret("FREESOUND_API_KEY", required=False) if enable_sfx else "",
             sfx_cache_dir=SFX_CACHE_DIR,
             on_progress=on_progress,
         )
     except PipelineError as exc:
-        st.error(str(exc))
+        st.error(str(exc) or repr(exc))
         return MOCK_STORY_PAGES
     except Exception as exc:
-        st.error(f"Generation failed: {exc}")
+        import traceback
+
+        detail = str(exc).strip() or repr(exc)
+        st.error(f"Generation failed: {type(exc).__name__}: {detail}")
+        with st.expander("Technical details"):
+            st.code(traceback.format_exc())
         return MOCK_STORY_PAGES
 
     st.session_state.ambience_by_emotion = {
         emotion: clip for emotion, clip in result.ambience_by_emotion.items() if clip is not None
     }
+    st.session_state.theatre_script = result.theatre_script
+    # Guard: surface missing audio clearly instead of silent 1s placeholders
+    missing_audio = sum(
+        1
+        for p in result.pages
+        for s in p.get("sentences", [])
+        if not s.get("audio_path")
+    )
+    if missing_audio:
+        st.warning(
+            f"{missing_audio} sentence(s) have no narration audio — check XTTS/GPU install "
+            f"(TTS_BACKEND={TTS_BACKEND})."
+        )
     return result.pages
 
 
@@ -276,6 +798,14 @@ def _silent_wav_bytes(duration_s: float = 1.2, sample_rate: int = 16000) -> byte
 
 PLACEHOLDER_AUDIO = _silent_wav_bytes()
 
+APP_ROOT = Path(__file__).resolve().parent
+
+
+def _voice_asset_path(rel: str) -> Path:
+    """Resolve built-in voice paths relative to the app, not the process cwd."""
+    p = Path(rel)
+    return p if p.is_absolute() else (APP_ROOT / p)
+
 # ---------------------------------------------------------------------------
 # COPY
 # ---------------------------------------------------------------------------
@@ -285,10 +815,14 @@ FORMAL_EN = {
     "sub": ("Upload a storybook and a reference voice. Each sentence is read in "
             "its own emotional register — and the page changes colour to match."),
     "kicker": "Emotion-aware narration",
-    "up_pdf": "Storybook (PDF)", "up_voice": "Reference voice",
+    "up_pdf": "Storybook (PDF)", "up_voice": "Upload voice file",
+    "rec_voice": "Record your voice",
+    "rec_hint": "Record at least ~6 seconds of clear speech (a short paragraph is ideal).",
+    "own_upload": "Upload", "own_record": "Record",
     "up_img": "Picture", "src_label": "Story source",
-    "v_label": "Voice", "v_own": "Upload a voice", "v_default": "Built-in voice",
+    "v_label": "Voice", "v_own": "My voice", "v_default": "Built-in voice",
     "v_pick": "Choose a narrator",
+    "v_missing": "Built-in voice files are missing. Reinstall assets/voices/ or use My voice.",
     "src_img": "Picture", "src_pdf": "PDF", "src_cam": "Camera",
     "cam_hint": "Point at the picture and take a shot.",
     "illus": "The picture",
@@ -304,16 +838,20 @@ FORMAL_EN = {
     "fallback_pdf": "Couldn't extract text from that PDF (scanned/image-only?) — showing the built-in sample story instead.",
     "fallback_img": "Picture-to-story isn't wired up yet — showing the built-in sample story instead.",
     "need_source": "Add a storybook or picture to begin.",
-    "need_voice": "Pick a voice to begin.",
+    "need_voice": "Pick, upload, or record a voice to begin.",
 }
 PLAYFUL_EN = {
     "title": "Story Time!",
     "sub": "Pick a story book and a voice — then I'll read it to you.",
     "kicker": "📖 Stories that feel things",
-    "up_pdf": "📚 Pick a story book", "up_voice": "🎤 Pick a voice",
+    "up_pdf": "📚 Pick a story book", "up_voice": "📁 Upload a voice file",
+    "rec_voice": "🎙 Record my voice",
+    "rec_hint": "Press record and talk for about 6–15 seconds — like reading a short line.",
+    "own_upload": "Upload", "own_record": "Record",
     "up_img": "🖼 Pick a picture", "src_label": "Where's the story?",
     "v_label": "Voice", "v_own": "🎤 My own voice", "v_default": "⭐ Ready-made voice",
     "v_pick": "Who should read it?",
+    "v_missing": "Hmm, that ready-made voice isn't here. Try recording your own!",
     "src_img": "🖼 Picture", "src_pdf": "📚 Book", "src_cam": "📷 Camera",
     "cam_hint": "Hold the picture up and snap it!",
     "illus": "Our picture",
@@ -328,17 +866,21 @@ PLAYFUL_EN = {
     "fallback_pdf": "Couldn't read that book — here's a story to try instead!",
     "fallback_img": "I can't read pictures yet — here's a story to try instead!",
     "need_source": "Add a picture or book to begin!",
-    "need_voice": "Pick a voice to begin!",
+    "need_voice": "Pick, upload, or record a voice!",
 }
 
 FORMAL_ZH = {
     "title": "情境<em>说书人</em>",
     "sub": "上传一本故事书和一段参考声音。每一句都会以它自己的情绪被朗读——页面颜色也随之改变。",
     "kicker": "情绪感知朗读",
-    "up_pdf": "故事书（PDF）", "up_voice": "参考声音",
+    "up_pdf": "故事书（PDF）", "up_voice": "上传声音文件",
+    "rec_voice": "录制你的声音",
+    "rec_hint": "请录制至少约 6 秒清晰朗读（一小段话即可）。",
+    "own_upload": "上传", "own_record": "录音",
     "up_img": "图片", "src_label": "故事来源",
-    "v_label": "声音", "v_own": "上传声音", "v_default": "内置声音",
+    "v_label": "声音", "v_own": "我的声音", "v_default": "内置声音",
     "v_pick": "选择朗读者",
+    "v_missing": "找不到内置声音文件。请检查 assets/voices/，或改用「我的声音」。",
     "src_img": "图片", "src_pdf": "PDF", "src_cam": "拍照",
     "cam_hint": "对准图片拍一张。",
     "illus": "这张图",
@@ -352,17 +894,21 @@ FORMAL_ZH = {
     "fallback_pdf": "无法从该 PDF 中提取文字（可能是扫描件或图片）——改为显示内置的示例故事。",
     "fallback_img": "图片转故事功能尚未接入——改为显示内置的示例故事。",
     "need_source": "请先添加一本故事书或图片。",
-    "need_voice": "请先选择一把声音。",
+    "need_voice": "请选择、上传或录制一把声音。",
 }
 
 PLAYFUL_ZH = {
     "title": "讲故事时间！",
     "sub": "选一本故事书和一把声音——我就念给你听。",
     "kicker": "📖 会有感情的故事",
-    "up_pdf": "📚 选一本故事书", "up_voice": "🎤 选一把声音",
+    "up_pdf": "📚 选一本故事书", "up_voice": "📁 上传声音文件",
+    "rec_voice": "🎙 录下我的声音",
+    "rec_hint": "按录音，大声念大约 6～15 秒就好！",
+    "own_upload": "上传", "own_record": "录音",
     "up_img": "🖼 选一张图片", "src_label": "故事在哪里？",
     "v_label": "声音", "v_own": "🎤 我自己的声音", "v_default": "⭐ 现成的声音",
     "v_pick": "谁来念呢？",
+    "v_missing": "咦，现成的声音不见了。试试自己录一段吧！",
     "src_img": "🖼 图片", "src_pdf": "📚 故事书", "src_cam": "📷 拍照",
     "cam_hint": "把图片举起来，拍一张！",
     "illus": "我们的图",
@@ -376,7 +922,7 @@ PLAYFUL_ZH = {
     "fallback_pdf": "没能读懂这本书——先给你讲个别的故事！",
     "fallback_img": "我还不会读图片——先给你讲个别的故事！",
     "need_source": "先加一张图片或一本书吧！",
-    "need_voice": "先选一把声音吧！",
+    "need_voice": "先选、上传或录一把声音吧！",
 }
 
 FORMAL = {"EN": FORMAL_EN, "ZH": FORMAL_ZH}
@@ -392,9 +938,7 @@ ZH_LABELS = {
     "Just telling": "慢慢讲",
 }
 
-# Built-in narrators. Point these at reference clips shipped with the app; the
-# path is handed to generate_mock_story() exactly like an uploaded file would
-# be. Missing files just disable "Default" mode until the team adds them.
+# Built-in narrators — WAV refs under assets/voices/ (shipped with the app).
 DEFAULT_VOICES = {
     "warm":   {"EN": "Warm grandparent", "ZH": "温暖的爷爷奶奶", "face": "🧓",
                "path": "assets/voices/warm.wav"},
@@ -466,7 +1010,9 @@ THEMES = {
         "audio_pad": "0", "audio_wrap_bg": "transparent",
         "audio_wrap_border": "1px solid rgba(246,241,232,.09)",
         "audio_wrap_radius": "0 0 18px 18px",
-        "audio_filter": "invert(92%) hue-rotate(180deg) contrast(.92) saturate(.6)",
+        # Don't invert <audio> — Chromium often plays silent/broken media when
+        # CSS filter is applied to the native player (voice recordings included).
+        "audio_filter": "none",
         "wave_h": "26px", "wave_radius": "2px", "wave_op": ".55",
         "progress": "bars", "prog_h": "3px", "prog_radius": "2px", "prog_gap": "4px",
         "prog_track": "rgba(246,241,232,.10)",
@@ -954,17 +1500,14 @@ html, body, [class*="css"], .stMarkdown{{ font-family:{T['f_ui']}; color:var(--i
    is shared by every widget on the page — closing it here would mean
    overriding that gap globally, at the cost of spacing everywhere else,
    so it's left as the documented limit of a display-layer-only fix. */
-audio[data-testid="stAudio"]{{ display:block !important; box-sizing:border-box;
-  width:100% !important; height:44px !important; margin:-2px 0 0 !important;
-  background:{T['audio_wrap_bg']} !important;
-  border:{T['audio_wrap_border']} !important; border-top:none !important;
-  border-radius:{T['audio_wrap_radius']} !important; padding:{T['audio_pad']} !important;
-  filter:{T['audio_filter']} !important; }}
-audio[data-testid="stAudio"]::-webkit-media-controls-panel{{
-  background-color:{T['audio_wrap_bg']} !important; }}
-
-.cs-ambience + div[data-testid="stAudio"], .cs-ambience ~ div[data-testid="stAudio"]:last-of-type{{
-  height:0; overflow:hidden; opacity:0; pointer-events:none; margin:0; padding:0; }}
+/* Do NOT style native <audio> (background/border/filter/height). Chromium can
+   keep the scrubber moving while sending silence — especially on headphone
+   devices. Leave players unstyled; only hide the looping ambience widget. */
+.cs-ambience + div[data-testid="stAudio"],
+.cs-ambience ~ div[data-testid="stAudio"]:last-of-type{{
+  position:absolute !important; width:1px !important; height:1px !important;
+  opacity:0 !important; pointer-events:none !important; overflow:hidden !important;
+}}
 .cs-amb-tag{{ position:absolute; z-index:2; left:16px; bottom:14px;
   display:inline-flex; align-items:center; gap:6px; font-family:{T['f_mono']};
   font-size:11px; font-weight:{T['count_w']}; opacity:.55; }}
@@ -1073,6 +1616,8 @@ with c1:
 with c2:
     if st.session_state.voice_mode is None:
         st.session_state.voice_mode = "Default"
+    if st.session_state.own_voice_method is None:
+        st.session_state.own_voice_method = "Upload"
     vmodes = {"Default": C["v_default"], "Own": C["v_own"]}
     if hasattr(st, "segmented_control"):
         st.segmented_control(C["v_label"], list(vmodes),
@@ -1083,7 +1628,69 @@ with c2:
                  key="voice_mode", horizontal=True, label_visibility="collapsed")
 
     if st.session_state.voice_mode == "Own":
-        voice_file = st.file_uploader(C["up_voice"], type=["wav", "mp3"])
+        own_methods = {"Upload": C["own_upload"], "Record": C["own_record"]}
+        if hasattr(st, "segmented_control"):
+            st.segmented_control(
+                "own_voice_method_label",
+                list(own_methods),
+                format_func=lambda k: own_methods[k],
+                key="own_voice_method",
+                label_visibility="collapsed",
+            )
+        else:
+            st.radio(
+                "own_voice_method_label",
+                list(own_methods),
+                format_func=lambda k: own_methods[k],
+                key="own_voice_method",
+                horizontal=True,
+                label_visibility="collapsed",
+            )
+        if st.session_state.own_voice_method == "Record":
+            if st.session_state.story:
+                st.caption("Voice already captured for this story. Re-generate to record a new sample.")
+                if st.session_state.get("recorded_voice_wav"):
+                    voice_file = _BytesVoice(
+                        st.session_state["recorded_voice_wav"], "recording.wav"
+                    )
+                else:
+                    voice_file = None
+            else:
+                st.caption(C["rec_hint"])
+                st.caption(
+                    "Streamlit’s old recorder often used a different (silent) device. "
+                    "Use this panel: Listen until the bar moves, then Record/Stop on the **same** mic."
+                )
+                payload = record_voice(key="storyteller_mic")
+                voice_file = None
+                if payload and payload.get("data_b64"):
+                    try:
+                        wav_bytes, peak = recording_to_wav_bytes(payload)
+                        voice_file = _BytesVoice(wav_bytes, "recording.wav")
+                        st.session_state["recorded_voice_wav"] = wav_bytes
+                        _preview_wav_bytes(wav_bytes, peak=peak)
+                    except Exception as exc:
+                        st.error(f"Could not decode recording: {exc}")
+                elif st.session_state.get("recorded_voice_wav"):
+                    # Keep last good take across Streamlit reruns until a new one arrives
+                    wav_bytes = st.session_state["recorded_voice_wav"]
+                    voice_file = _BytesVoice(wav_bytes, "recording.wav")
+                    _preview_wav_bytes(wav_bytes, peak=0.5)
+        else:
+            voice_file = st.file_uploader(C["up_voice"], type=["wav", "mp3", "m4a", "webm", "ogg"])
+            if voice_file is not None:
+                try:
+                    raw = _read_voice_bytes(voice_file)
+                    import io
+                    from pydub import AudioSegment
+
+                    seg = AudioSegment.from_file(io.BytesIO(raw)).set_channels(1)
+                    peak = float(seg.max) / float(seg.max_possible_amplitude or 1)
+                    out = io.BytesIO()
+                    seg.export(out, format="wav")
+                    _preview_wav_bytes(out.getvalue(), peak=peak)
+                except Exception as exc:
+                    st.warning(f"Preview failed ({exc}); you can still try Generate.")
     else:
         keys = list(DEFAULT_VOICES)
         pick = st.selectbox(
@@ -1092,10 +1699,21 @@ with c2:
             format_func=lambda k: f'{DEFAULT_VOICES[k]["face"]}  '
                                   f'{DEFAULT_VOICES[k][LANG]}')
         st.session_state.voice_preset = pick
-        path = DEFAULT_VOICES[pick]["path"]
-        voice_file = path if os.path.exists(path) else None
+        path = _voice_asset_path(DEFAULT_VOICES[pick]["path"])
+        voice_file = str(path) if path.exists() else None
         if voice_file:
-            st.audio(voice_file)
+            try:
+                raw = Path(voice_file).read_bytes()
+                import io
+                from pydub import AudioSegment
+
+                seg = AudioSegment.from_file(io.BytesIO(raw)).set_channels(1)
+                peak = float(seg.max) / float(seg.max_possible_amplitude or 1)
+                _preview_wav_bytes(raw if raw[:4] == b"RIFF" else raw, peak=peak)
+            except Exception:
+                st.audio(voice_file)
+        else:
+            st.warning(C["v_missing"])
 
 ready = bool(story_file and voice_file)
 go = st.button(C["cta"], type="primary" if ready else "secondary",
@@ -1109,24 +1727,49 @@ if not ready:
 # ---------------------------------------------------------------------------
 
 if go:
-    slot = st.empty()
+    # st.progress / st.status flush to the browser during long XTTS work;
+    # a custom st.empty().html slot often stays stuck on the last pre-synth message.
+    status_box = st.status(C["load"], expanded=True)
+    progress_bar = st.progress(0, text="Starting…")
+    n_sent_hint = None
 
     def _show_loading(message):
-        slot.html(f'<div class="cs-loading"><div class="cs-dots"><i></i><i></i><i></i>'
-                  f'</div><p>{message}</p></div>')
+        try:
+            msg = str(message)
+            status_box.update(label=msg, state="running")
+            m = re.search(r"XTTS\s+(\d+)\s*/\s*(\d+)", msg)
+            if m:
+                cur, total = int(m.group(1)), max(1, int(m.group(2)))
+                # During "done — N/N" show 100%; during load keep a small pulse.
+                frac = min(1.0, cur / total)
+                progress_bar.progress(frac, text=msg[:120])
+            elif "Loading XTTS" in msg:
+                progress_bar.progress(0.02, text=msg[:120])
+            elif n_sent_hint:
+                progress_bar.progress(0.05, text=f"{n_sent_hint} · {msg[:100]}")
+            else:
+                progress_bar.progress(0.05, text=msg[:120])
+        except Exception:
+            pass
 
-    _show_loading(C["load"])
+    extract_ok = True
     if src == "PDF":
         pdf_bytes = story_file.getvalue()
         try:
-            pages = extract_pages_from_pdf(story_file)
-        except Exception:
-            # extract_pages_from_pdf() documents returning None for
-            # unreadable text; treat an outright parse failure the same way
-            # rather than crashing the whole page on a malformed upload.
+            # Always parse from bytes — UploadedFile stream position is unreliable.
+            pages = extract_pages_from_pdf(pdf_bytes)
+        except Exception as exc:
             pages = None
+            st.warning(f"PDF text extract error: {type(exc).__name__}: {exc}")
+        extract_ok = bool(pages)
+        if extract_ok:
+            n_sent = sum(len(p.get("sentences", [])) for p in pages)
+            n_sent_hint = f"Found {n_sent} sentences in PDF"
+            st.info(n_sent_hint + " — narrating with local XTTS (GPU). Keep this tab open.")
+            _show_loading(n_sent_hint + " — preparing voice…")
+        else:
+            _show_loading("No embedded PDF text — trying vision story generation…")
         st.session_state.illustration = None
-        fallback_msg = C["fallback_pdf"]
         raw_source = pdf_bytes
     else:
         # Single image → one page. generate_mock_story still receives a
@@ -1136,8 +1779,10 @@ if go:
         pages = [story_file]
         image_bytes = story_file.getvalue()
         st.session_state.illustration = image_bytes
-        fallback_msg = C["fallback_img"]
+        extract_ok = True
         raw_source = [Image.open(io.BytesIO(image_bytes))]
+        _show_loading(C["load"])
+
     story = generate_mock_story(
         pages, voice_file,
         raw_source_bytes=raw_source,
@@ -1145,14 +1790,53 @@ if go:
         enable_sfx=st.session_state.sfx,
         on_progress=_show_loading,
     )
+    try:
+        progress_bar.progress(1.0, text="Done")
+        status_box.update(
+            label="Narration ready" if story is not MOCK_STORY_PAGES else "Generation failed",
+            state="complete" if story is not MOCK_STORY_PAGES else "error",
+        )
+    except Exception:
+        pass
+
     st.session_state.story = story
     st.session_state.used_fallback = story is MOCK_STORY_PAGES
     st.session_state.idx = 0
     st.session_state.dir = "fwd"
-    slot.empty()
+    st.session_state.autoplay = False
+    st.session_state.play_mode = "full"
+    try:
+        st.session_state.narrator_voice_bytes = _read_voice_bytes(voice_file)
+    except Exception:
+        st.session_state.narrator_voice_bytes = None
+    st.session_state.full_story_audio = (
+        None if story is MOCK_STORY_PAGES else _build_full_story_wav(story)
+    )
+    if story is MOCK_STORY_PAGES:
+        st.session_state.story_chapters = []
+        st.session_state.story_timeline = []
+    else:
+        ch0 = _chapter_from_pages(story, title="Chapter 1 — Original story")
+        st.session_state.story_chapters = [ch0]
+        st.session_state.story_timeline = [_timeline_chapter(ch0)]
+    st.session_state.companion_session = new_session(
+        story, language=STORY_LANGUAGE[LANG], book_id="storyteller"
+    )
+    st.session_state.companion_chat = []
+    st.session_state.companion_voice_pending = None
+    st.session_state.last_question_wav = None
+    st.session_state.pending_question_wav = None
+    st.session_state.last_ask_sig = None
 
     if st.session_state.used_fallback:
-        st.info(fallback_msg)
+        if src == "PDF" and not extract_ok:
+            st.info(C["fallback_pdf"])
+        else:
+            st.info(
+                "Showing the built-in sample story because generation failed "
+                "(see the red error above). Charlie PDFs with text should use "
+                "XTTS narration — restart Streamlit if the model was mid-reload."
+            )
 
 # ---------------------------------------------------------------------------
 # EMPTY STATE
@@ -1178,102 +1862,240 @@ i = st.session_state.idx
 page_no, sent = flat[i]
 e = emo(sent.get("emotion"))
 
+# Companion: for continuous play, treat the whole story as heard once full audio exists
+if st.session_state.companion_session is not None:
+    heard_to = (total - 1) if st.session_state.full_story_audio else i
+    st.session_state.companion_session.advance_to(heard_to)
+elif st.session_state.story:
+    st.session_state.companion_session = new_session(
+        st.session_state.story, language=STORY_LANGUAGE[LANG], book_id="storyteller"
+    )
+    st.session_state.companion_session.advance_to(
+        (total - 1) if st.session_state.full_story_audio else i
+    )
+
 st.html('<hr class="cs-rule">')
 
-st.html(f'<div class="cs-badge" style="background:{e["chip"]};color:{e["chip_ink"]}">'
-        f'<span style="animation:{e["wig"]}">{e["face"]}</span>'
-        f'{C["atmos"]}: {lab(e)}</div>')
+# Rebuild continuous audio / chapter feed if missing
+if st.session_state.story is not MOCK_STORY_PAGES:
+    if st.session_state.full_story_audio is None:
+        st.session_state.full_story_audio = _build_full_story_wav(st.session_state.story)
+    if not st.session_state.get("story_chapters"):
+        ch0 = _chapter_from_pages(st.session_state.story, title="Chapter 1 — Original story")
+        st.session_state.story_chapters = [ch0]
+        if not st.session_state.get("story_timeline"):
+            st.session_state.story_timeline = [_timeline_chapter(ch0)]
 
-bars = "".join(f'<i style="background:{e["line"]};animation-delay:{(n % 9) * .11:.2f}s;'
-               f'height:{30 + (n * 41) % 70}%"></i>' for n in range(26))
+full_wav = st.session_state.full_story_audio
+timeline = _ensure_story_timeline()
+n_chapters = sum(1 for ev in timeline if ev.get("kind") == "chapter")
 
-illus_html = ""
-if st.session_state.illustration:
-    b64 = base64.b64encode(st.session_state.illustration).decode()
-    illus_html = (f'<figure class="cs-illus" style="background:{e["chip"]}">'
-                  f'<img src="data:image/png;base64,{b64}" alt="{C["illus"]}">'
-                  f'<figcaption>{C["illus"]}</figcaption></figure>')
+st.html(
+    f'<div class="cs-badge" style="background:{e["chip"]};color:{e["chip_ink"]}">'
+    f'<span style="animation:{e["wig"]}">{e["face"]}</span>'
+    f'{C["atmos"]}: {n_chapters} chapter(s) · {total} sentences · '
+    f'{len(timeline)} beat(s) in order</div>'
+)
 
-st.html(f"""
-<div class="cs-stage">
-  <div class="cs-page" data-dir="{st.session_state.dir}" data-key="{i}"
-       style="background:{e['wash']};color:{e['ink']};
-              box-shadow:{T['card_shadow'].format(glow=e['glow'], ink=e['ink'])};">
-    <div class="cs-face" style="background:{e['chip']};color:{e['ink']}">
-      <i style="animation:{e['wig']}">{e['face']}</i></div>
-    {illus_html}
-    <div class="cs-meta" style="opacity:.75">
-      <span>Page {page_no}</span>
-      <span class="cs-dot" style="background:{e['line']}"></span>
-      <span>{i + 1}/{total}</span></div>
-    <p class="cs-text"><span class="cs-face-spacer"></span>{sent.get("text", "")}</p>
-    <div class="cs-speaker" style="opacity:.8">
-      <i style="background:{e['line']}"></i>{sent.get("speaker", "narrator")}</div>
-    <div class="cs-audio-lip" style="background:{e['line']}"></div>
-    <div class="cs-wave">{bars}</div>
-  </div>
-</div>
-""")
-
-# Per-sentence audio: real audio_path once the TTS pipeline provides one,
-# otherwise a silent placeholder so the player is always present to test.
-if sent.get("audio_path"):
-    st.audio(sent["audio_path"])
-else:
-    st.audio(PLACEHOLDER_AUDIO, format="audio/wav")
-
-# Looping ambience for the current emotion. Prefers a freshly Freesound-fetched
-# clip (raw bytes, kept in session_state since it's fetched mid-script-run and
-# a plain module global like SFX gets reset to its static defaults on every
-# rerun) and falls back to a static bundled file path if present.
-if st.session_state.sfx:
-    emotion_key = (sent.get("emotion") or "neutral").lower()
-    track = st.session_state.ambience_by_emotion.get(emotion_key)
-    if track is None:
-        track = SFX.get(emotion_key)
-    track_is_playable = isinstance(track, (bytes, bytearray)) or (
-        isinstance(track, str) and os.path.exists(track)
+st.subheader("Play entire story so far")
+st.caption("Optional: one player for all narrated story audio. The feed below is the chronological log.")
+if full_wav:
+    _st_play_wav(
+        full_wav,
+        label="Full story audio",
+        download_name="storyteller_full_story.wav",
+        key="full_story",
     )
-    if track_is_playable:
-        st.html('<div class="cs-ambience">')
-        try:
-            st.audio(track, loop=True, autoplay=True)
-        except TypeError:
-            st.audio(track)
-        st.html('</div>')
-
-# Progress — three shapes, one dict key
-kind = T["progress"]
-if kind == "track":
-    pct = (i + 1) / total * 100
-    seg = f'<i style="flex:0 0 {pct}%;background:{e["line"]}"></i>'
 else:
-    seg = "".join(f'<i style="background:{e["line"] if n <= i else T["prog_track"]}">'
-                  f'</i>' for n in range(total))
-st.html(f'<div class="cs-progress" data-kind="{kind}">{seg}</div>')
+    st.warning("Full-story audio isn’t ready yet (missing sentence clips).")
 
-n1, n2, n3 = st.columns([1, 1.3, 1], gap="small")
-with n1:
-    if st.button(C["prev"], disabled=i == 0, use_container_width=True):
-        st.session_state.dir = "back"
-        st.session_state.idx -= 1
-        st.rerun()
-with n2:
-    if st.button(C["pause"] if st.session_state.autoplay else C["play"],
-                 use_container_width=True):
-        st.session_state.autoplay = not st.session_state.autoplay
-        st.rerun()
-with n3:
-    if st.button(C["next"], disabled=i >= total - 1, use_container_width=True):
-        st.session_state.dir = "fwd"
-        st.session_state.idx += 1
-        st.rerun()
+with st.expander("Sentence follow-along (optional)", expanded=False):
+    st.caption("Jump to a single sentence if you want — not required for listening.")
+    bars = "".join(
+        f'<i style="background:{e["line"]};animation-delay:{(n % 9) * .11:.2f}s;'
+        f'height:{30 + (n * 41) % 70}%"></i>' for n in range(26)
+    )
+    st.html(f"""
+    <div class="cs-stage">
+      <div class="cs-page" data-dir="{st.session_state.dir}" data-key="{i}"
+           style="background:{e['wash']};color:{e['ink']};
+                  box-shadow:{T['card_shadow'].format(glow=e['glow'], ink=e['ink'])};">
+        <div class="cs-face" style="background:{e['chip']};color:{e['ink']}">
+          <i style="animation:{e['wig']}">{e['face']}</i></div>
+        <div class="cs-meta" style="opacity:.75">
+          <span>Page {page_no}</span>
+          <span class="cs-dot" style="background:{e['line']}"></span>
+          <span>{i + 1}/{total}</span></div>
+        <p class="cs-text"><span class="cs-face-spacer"></span>{sent.get("text", "")}</p>
+        <div class="cs-speaker" style="opacity:.8">
+          <i style="background:{e['line']}"></i>{sent.get("speaker", "narrator")}</div>
+        <div class="cs-wave">{bars}</div>
+      </div>
+    </div>
+    """)
+    if sent.get("audio_path"):
+        clip = sent["audio_path"]
+        if isinstance(clip, (bytes, bytearray)):
+            _st_play_wav(bytes(clip), label="This sentence", download_name="sentence.wav", key=f"sent_{i}")
+        else:
+            st.audio(clip)
+    n1, n2, n3 = st.columns(3)
+    with n1:
+        if st.button(C["prev"], disabled=i == 0, use_container_width=True, key="sent_prev"):
+            st.session_state.idx -= 1
+            st.rerun()
+    with n2:
+        st.caption(C["of"].format(a=i + 1, b=total))
+    with n3:
+        if st.button(C["next"], disabled=i >= total - 1, use_container_width=True, key="sent_next"):
+            st.session_state.idx += 1
+            st.rerun()
 
-st.html(f'<div class="cs-counter"><span>{C["of"].format(a=i + 1, b=total)}</span>'
-        f'<span>{lab(e)}</span></div>')
+# Disable old page-flip autoplay — continuous player is the default.
+st.session_state.autoplay = False
 
-if st.session_state.autoplay and i < total - 1:
-    time.sleep(3.2)
-    st.session_state.dir = "fwd"
-    st.session_state.idx += 1
+st.html('<hr class="cs-rule">')
+st.subheader("Story & Companion — in order")
+st.caption(
+    "Top → bottom is time order: original story, then each question, answer, "
+    "or Continue beat as it happened. New actions always append below."
+)
+
+for ti, ev in enumerate(timeline):
+    kind = ev.get("kind")
+    audio = ev.get("audio")
+    if kind == "chapter":
+        face = e["face"]
+        st.html(
+            f'<div class="cs-badge" style="background:{e["chip"]};color:{e["chip_ink"]};margin-top:12px">'
+            f'<span style="animation:{e["wig"]}">{face}</span>{ev.get("title", f"Chapter")}</div>'
+        )
+        st.markdown(ev.get("text") or "")
+        if isinstance(audio, (bytes, bytearray)) and audio:
+            _st_play_wav(
+                bytes(audio),
+                label=f"Play · {ev.get('title', 'Chapter')}",
+                download_name=f"timeline_{ti}.wav",
+                key=f"tl_{ti}",
+            )
+    elif kind == "user":
+        with st.chat_message("user"):
+            st.markdown(ev.get("text") or "")
+            if isinstance(audio, (bytes, bytearray)) and audio:
+                _st_play_wav(
+                    bytes(audio),
+                    label="Your question",
+                    download_name=f"q_{ti}.wav",
+                    key=f"tl_{ti}",
+                )
+    else:
+        with st.chat_message("assistant"):
+            st.markdown(ev.get("text") or "")
+            if isinstance(audio, (bytes, bytearray)) and audio:
+                _st_play_wav(
+                    bytes(audio),
+                    label="Narrator reply",
+                    download_name=f"a_{ti}.wav",
+                    key=f"tl_{ti}",
+                )
+
+# ---------------------------------------------------------------------------
+# CONTROLS — always at the bottom so the feed stays chronological
+# ---------------------------------------------------------------------------
+st.html('<hr class="cs-rule">')
+heard_index = (total - 1) if st.session_state.full_story_audio else i
+st.subheader("Add next")
+st.caption(
+    f"TTS **{TTS_BACKEND}** · {total} sentences so far. "
+    "Continue or ask — each result appends at the bottom of the feed above."
+)
+
+if st.button("Continue story", type="primary", use_container_width=True, key="continue_story_btn"):
+    try:
+        _continue_story_beat(heard_index=heard_index)
+        st.rerun()
+    except Exception as exc:
+        st.error(f"Continue story failed: {type(exc).__name__}: {exc}")
+
+st.markdown("##### Ask with your voice")
+st.caption(
+    "**Check level** = meter only. **Record/Stop**, preview below, then **Send question**. "
+    "Prefer External Mic; in Brave use Download if the player is silent."
+)
+ask_payload = record_voice(key="companion_ask_mic")
+if isinstance(ask_payload, dict) and ask_payload.get("data_b64"):
+    # Prefer take_id — WebM files share identical base64 *prefixes*, so [:96] collided
+    sig = (
+        str(ask_payload.get("take_id") or "")
+        or f"{ask_payload.get('bytes')}_{ask_payload.get('peak')}_{ask_payload['data_b64'][-48:]}"
+    )
+    if st.session_state.get("last_ask_sig") != sig:
+        try:
+            wav_bytes, peak = recording_to_wav_bytes(ask_payload)
+            play_q = _for_browser_playback(wav_bytes)
+            st.session_state.last_question_wav = play_q or wav_bytes
+            st.session_state.pending_question_wav = wav_bytes
+            st.session_state.pending_question_peak = peak
+            st.session_state.last_ask_sig = sig
+            st.success(
+                f"Got your recording ({ask_payload.get('bytes', 0)} bytes, "
+                f"level {int(peak * 100)}%). Preview / Send below."
+            )
+        except Exception as exc:
+            st.error(f"Could not decode recording: {exc}")
+
+pending = st.session_state.get("pending_question_wav")
+preview = st.session_state.get("last_question_wav")
+if pending:
+    peak = float(st.session_state.get("pending_question_peak") or 0)
+    _st_play_wav(
+        preview or pending,
+        label=f"Your recording · level {int(peak * 100)}% — play or download before sending",
+        download_name="my_question.mp3",
+        key="q_persistent",
+    )
+    if peak < 0.02:
+        st.error(
+            "Recording looks silent. Try External Mic, Check level until the bar moves, Record again."
+        )
+    elif st.button(
+        "Send question to Companion",
+        type="primary",
+        use_container_width=True,
+        key="send_q",
+    ):
+        raw = pending
+        try:
+            client, _ = _openai_compatible_client()
+            question = transcribe_wav_bytes(
+                client, raw, language=STORY_LANGUAGE[LANG]
+            )
+            st.info(f"Heard: “{question}”")
+            _handle_companion_question(
+                question, heard_index=heard_index, question_audio=raw
+            )
+            st.session_state.pending_question_wav = None
+            st.session_state.last_question_wav = None
+            st.rerun()
+        except Exception as exc:
+            st.error(f"Voice question failed: {type(exc).__name__}: {exc}")
+
+st.markdown("##### Or type a question")
+typed_cols = st.columns([4, 1])
+with typed_cols[0]:
+    typed_q = st.text_input(
+        "Question",
+        value="",
+        placeholder="Ask something about the story…",
+        label_visibility="collapsed",
+        key="typed_question_input",
+    )
+with typed_cols[1]:
+    send_typed = st.button("Ask", use_container_width=True, key="typed_ask_btn")
+if send_typed and (typed_q or "").strip():
+    _handle_companion_question(typed_q.strip(), heard_index=heard_index)
     st.rerun()
+
+if st.session_state.theatre_script:
+    with st.expander("Theatre script JSON"):
+        st.json(st.session_state.theatre_script)

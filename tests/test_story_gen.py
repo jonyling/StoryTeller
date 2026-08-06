@@ -61,6 +61,21 @@ def test_openai_story_generator_parses_response_and_sends_all_images():
     assert len(image_blocks) == 3
 
 
+def test_openai_story_generator_empty_content_raises_pipeline_error():
+    from pipeline.errors import PipelineError
+
+    fake_client = MagicMock()
+    fake_client.chat.completions.create.return_value.choices = [
+        MagicMock(
+            message=MagicMock(content=None, refusal="blocked"),
+            finish_reason="content_filter",
+        )
+    ]
+    generator = OpenAIStoryGenerator(fake_client)
+    with pytest.raises(PipelineError, match="empty content"):
+        generator.generate(_sample_images(1), "English")
+
+
 def test_openai_story_generator_falls_back_to_neutral_for_unknown_emotion():
     fake_client = MagicMock()
     payload = {"sentences": [{"text": "Hello.", "speaker": "narrator", "emotion": "confused"}]}
