@@ -11,10 +11,15 @@ from pipeline.theatre import RuleBasedTheatreAdapter, theatre_lines_to_script_do
 
 _EMOTION_SFX_MOOD = {
     "angry": "thunderstorm",
-    "excited": "cheerful sparkle",
+    # "cheerful sparkle" and "quiet room tone" were empirically confirmed (live
+    # Freesound queries) to return musical/off-vibe top results ("cheerful sparkle"
+    # returned a calm/mellow chime track; "quiet room tone" returned an orchestral
+    # recording) despite better matches existing further down the same result set —
+    # these two phrasings return consistently on-vibe, ambience-tagged results instead.
+    "excited": "carnival atmosphere",
     "sad": "gentle rain",
     "calm": "flowing river",
-    "neutral": "quiet room tone",
+    "neutral": "room tone",
 }
 
 

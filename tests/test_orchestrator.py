@@ -112,7 +112,7 @@ def test_run_pipeline_with_sfx_fetches_ambience_per_distinct_emotion(mock_fetch_
     assert result.used_sfx is True
     assert mock_fetch_ambience.call_count == 2
     called_moods = {call.args[0] for call in mock_fetch_ambience.call_args_list}
-    assert called_moods == {"flowing river", "cheerful sparkle"}
+    assert called_moods == {"flowing river", "carnival atmosphere"}
     assert set(result.ambience_by_emotion.keys()) == {"calm", "excited"}
 
 
