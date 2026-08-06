@@ -1,4 +1,6 @@
 import os
+import subprocess
+import sys
 
 import pytest
 
@@ -115,3 +117,36 @@ def test_ensure_ffmpeg_on_path_does_not_duplicate_entry_on_repeated_calls(monkey
     ensure_ffmpeg_on_path()
 
     assert os.environ["PATH"] == str(dll_dir) + os.pathsep + "C:\\existing"
+
+
+def test_importing_any_pipeline_submodule_patches_ffmpeg_path_first(tmp_path):
+    """pipeline/audio_utils.py imports pydub directly and never imports
+    pipeline.config — pydub probes for ffmpeg at its own import time, so on
+    a fresh interpreter that probe would run before our PATH patch unless
+    pipeline/__init__.py guarantees the patch happens first for every
+    submodule import. Runs in a subprocess because import order is only
+    observable on a fresh interpreter — modules stay cached across tests
+    in-process."""
+    dll_dir = (
+        tmp_path / "Microsoft" / "WinGet" / "Packages"
+        / "BtbN.FFmpeg.GPL.Shared.8.1" / "ffmpeg-8.1" / "bin"
+    )
+    dll_dir.mkdir(parents=True)
+    (dll_dir / "avcodec-62.dll").write_bytes(b"")
+
+    env = dict(os.environ)
+    env["LOCALAPPDATA"] = str(tmp_path)
+    env["PATH"] = "C:\\existing"
+
+    script = "import os; import pipeline.audio_utils; print(os.environ['PATH'])"
+    result = subprocess.run(
+        [sys.executable, "-c", script],
+        cwd=os.getcwd(),
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert str(dll_dir) in result.stdout
