@@ -57,7 +57,7 @@
     <div id="previewWrap" style="display:none;margin-top:10px;">
       <audio id="previewAudio" controls style="width:100%;height:36px;"></audio>
       <div id="previewHint" style="margin-top:6px;opacity:.8;font-size:12px;">
-        Preview above. Streamlit should show Send below — if not, click “Push to app”.
+        Preview above. Below the mic box, click <b>Add to Companion</b>. If missing, tap Push again.
       </div>
       <button id="pushBtn" type="button" class="primary" style="margin-top:8px;width:100%;">Push to app</button>
     </div>
@@ -134,9 +134,60 @@
       lastPayload = stamped;
       Streamlit.setComponentValue(stamped);
       setStatus(
-        "Sent " + Math.round((payload.bytes || 0) / 1024) + " KB to the app · peak " +
-        Math.round((payload.peak || 0) * 100) + "%. Look for the player / Send below."
+        "Sent " + Math.round((payload.bytes || 0) / 1024) + " KB · peak " +
+        Math.round((payload.peak || 0) * 100) + "%. Scroll just below → Add to Companion."
       );
+    }
+
+    function writeString(view, offset, str) {
+      for (let i = 0; i < str.length; i++) view.setUint8(offset + i, str.charCodeAt(i));
+    }
+
+    function encodeWavMono16(float32, sampleRate) {
+      const n = float32.length;
+      const buffer = new ArrayBuffer(44 + n * 2);
+      const view = new DataView(buffer);
+      writeString(view, 0, "RIFF");
+      view.setUint32(4, 36 + n * 2, true);
+      writeString(view, 8, "WAVE");
+      writeString(view, 12, "fmt ");
+      view.setUint32(16, 16, true);
+      view.setUint16(20, 1, true);
+      view.setUint16(22, 1, true);
+      view.setUint32(24, sampleRate, true);
+      view.setUint32(28, sampleRate * 2, true);
+      view.setUint16(32, 2, true);
+      view.setUint16(34, 16, true);
+      writeString(view, 36, "data");
+      view.setUint32(40, n * 2, true);
+      let off = 44;
+      for (let i = 0; i < n; i++) {
+        let s = Math.max(-1, Math.min(1, float32[i]));
+        view.setInt16(off, s < 0 ? s * 0x8000 : s * 0x7fff, true);
+        off += 2;
+      }
+      return buffer;
+    }
+
+    async function blobToWav16k(blob) {
+      // Compact WAV travels reliably through Streamlit component JSON; WebM often does not.
+      const ab = await blob.arrayBuffer();
+      const ctx = new (window.AudioContext || window.webkitAudioContext)();
+      let audioBuf;
+      try {
+        audioBuf = await ctx.decodeAudioData(ab.slice(0));
+      } finally {
+        try { await ctx.close(); } catch (e) {}
+      }
+      const targetRate = 16000;
+      const frames = Math.max(1, Math.ceil(audioBuf.duration * targetRate));
+      const offline = new OfflineAudioContext(1, frames, targetRate);
+      const src = offline.createBufferSource();
+      src.buffer = audioBuf;
+      src.connect(offline.destination);
+      src.start(0);
+      const rendered = await offline.startRendering();
+      return encodeWavMono16(rendered.getChannelData(0), targetRate);
     }
 
     function arrayBufferToBase64(buffer) {
@@ -355,8 +406,7 @@
         recBtn.classList.add("primary");
 
         const blob = new Blob(chunks, { type: mediaRecorder.mimeType || "audio/webm" });
-        const buf = await blob.arrayBuffer();
-        if (!buf.byteLength || recPeak < 0.02) {
+        if (!blob.size || recPeak < 0.02) {
           setStatus(
             "Recording was silent (peak " + Math.round(recPeak * 100) +
             "%). Pick another mic in the dropdown, Check level again, then Record."
@@ -366,13 +416,31 @@
           bumpHeight();
           return;
         }
+        setStatus("Encoding take for the app…");
+        let wavBuf;
+        try {
+          wavBuf = await blobToWav16k(blob);
+        } catch (e) {
+          // Fallback: send original webm if decode fails
+          const buf = await blob.arrayBuffer();
+          const payload = {
+            mime: blob.type || "audio/webm",
+            data_b64: arrayBufferToBase64(buf),
+            peak: recPeak,
+            bytes: buf.byteLength,
+          };
+          showLocalPreview(blob, payload);
+          pushPayload(payload);
+          return;
+        }
+        const wavBlob = new Blob([wavBuf], { type: "audio/wav" });
         const payload = {
-          mime: blob.type || "audio/webm",
-          data_b64: arrayBufferToBase64(buf),
+          mime: "audio/wav",
+          data_b64: arrayBufferToBase64(wavBuf),
           peak: recPeak,
-          bytes: buf.byteLength,
+          bytes: wavBuf.byteLength,
         };
-        showLocalPreview(blob, payload);
+        showLocalPreview(wavBlob, payload);
         pushPayload(payload);
       };
 

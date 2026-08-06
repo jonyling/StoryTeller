@@ -1987,7 +1987,7 @@ if st.button("Continue story", type="primary", use_container_width=True, key="co
 
 st.markdown("##### Ask with your voice")
 st.caption(
-    "**Check level** = meter only. **Record/Stop**, preview below, then **Send question**. "
+    "**Check level** = meter only. **Record/Stop**, then click **Add to Companion** below. "
     "Prefer External Mic; in Brave use Download if the player is silent."
 )
 ask_payload = record_voice(key="companion_ask_mic")
@@ -2005,10 +2005,8 @@ if isinstance(ask_payload, dict) and ask_payload.get("data_b64"):
             st.session_state.pending_question_wav = wav_bytes
             st.session_state.pending_question_peak = peak
             st.session_state.last_ask_sig = sig
-            st.success(
-                f"Got your recording ({ask_payload.get('bytes', 0)} bytes, "
-                f"level {int(peak * 100)}%). Preview / Send below."
-            )
+            # Force a clean rerun so Add to Companion is visible (component updates can skip widgets)
+            st.rerun()
         except Exception as exc:
             st.error(f"Could not decode recording: {exc}")
 
@@ -2016,37 +2014,42 @@ pending = st.session_state.get("pending_question_wav")
 preview = st.session_state.get("last_question_wav")
 if pending:
     peak = float(st.session_state.get("pending_question_peak") or 0)
-    _st_play_wav(
-        preview or pending,
-        label=f"Your recording · level {int(peak * 100)}% — play or download before sending",
-        download_name="my_question.mp3",
-        key="q_persistent",
-    )
+    st.success(f"Recording ready · level {int(peak * 100)}%")
+    # Button first — heavy players used to push it below the fold / fail before render
     if peak < 0.02:
         st.error(
             "Recording looks silent. Try External Mic, Check level until the bar moves, Record again."
         )
-    elif st.button(
-        "Send question to Companion",
-        type="primary",
-        use_container_width=True,
-        key="send_q",
-    ):
-        raw = pending
-        try:
-            client, _ = _openai_compatible_client()
-            question = transcribe_wav_bytes(
-                client, raw, language=STORY_LANGUAGE[LANG]
-            )
-            st.info(f"Heard: “{question}”")
-            _handle_companion_question(
-                question, heard_index=heard_index, question_audio=raw
-            )
-            st.session_state.pending_question_wav = None
-            st.session_state.last_question_wav = None
-            st.rerun()
-        except Exception as exc:
-            st.error(f"Voice question failed: {type(exc).__name__}: {exc}")
+    else:
+        if st.button(
+            "Add to Companion",
+            type="primary",
+            use_container_width=True,
+            key="send_q",
+        ):
+            raw = pending
+            try:
+                client, _ = _openai_compatible_client()
+                question = transcribe_wav_bytes(
+                    client, raw, language=STORY_LANGUAGE[LANG]
+                )
+                st.info(f"Heard: “{question}”")
+                _handle_companion_question(
+                    question, heard_index=heard_index, question_audio=raw
+                )
+                st.session_state.pending_question_wav = None
+                st.session_state.last_question_wav = None
+                st.session_state.last_ask_sig = None
+                st.rerun()
+            except Exception as exc:
+                st.error(f"Voice question failed: {type(exc).__name__}: {exc}")
+    with st.expander("Preview / download your take", expanded=True):
+        _st_play_wav(
+            preview or pending,
+            label=f"Your recording · level {int(peak * 100)}%",
+            download_name="my_question.mp3",
+            key="q_persistent",
+        )
 
 st.markdown("##### Or type a question")
 typed_cols = st.columns([4, 1])
