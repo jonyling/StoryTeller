@@ -426,3 +426,21 @@ there is no full mocked-free integration test of the whole pipeline. Split:
 - License-aware SFX selection (favoring CC0/CC-BY Freesound results) — a
   known gap carried over from the original design, unaffected by this
   merge.
+
+## 11. Post-implementation updates (2026-08-06)
+
+The live app diverged from Sections 2–10 where noted below. Historical
+wording above is kept for design context; treat this section as current.
+
+| Topic | Original spec | Current implementation |
+| :--- | :--- | :--- |
+| TTS backend | ElevenLabs sole backend | **XTTS-v2 default** (`TTS_BACKEND=xtts`); ElevenLabs optional backup |
+| Narration | One ElevenLabs call + timestamp slice | **Per-sentence XTTS** (+ chunking for long lines); theatre **DSP prosody** via `pipeline/prosody.py` |
+| Voice sample length | 60–300 s (ElevenLabs IVC) | **~6–20 s** ref OK for XTTS (`pipeline/xtts_backend.py`) |
+| Text PDF | Vision skip implied | Extracted text narrated; **EN↔中文 translate** when picker ≠ script (`pipeline/translate.py`) |
+| Playback UI | Sentence-by-sentence primary | **Full-story player** + chronological **timeline**; sentence follow-along in expander |
+| Companion | Out of scope in §10 | **Implemented** — Q&A, voice ask, Continue story (`docs/2026-08-05-storyteller-companion-mode-addendum.md` §9) |
+| Mic | Streamlit `st.audio_input` | Custom **`mic_component/`** (device picker, level check, preview) |
+| Mandarin deps | ElevenLabs cross-lingual | XTTS + **`pypinyin`** in `requirements.txt` |
+
+**Changelog:** [`CHANGES.md`](../../../CHANGES.md) at repo root.

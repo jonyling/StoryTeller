@@ -2,8 +2,8 @@
 
 **Date:** 2026-08-05  
 **Parent design:** [`2026-08-03-context-aware-storyteller-design.md`](2026-08-03-context-aware-storyteller-design.md)  
-**Status:** Proposed extension for group work (post-POC / parallel track)  
-**Scope:** **Companion mode only** — not co-author / story-rewriting
+**Status:** Implemented (Streamlit app, 2026-08-06) — see §9 at end of doc  
+**Scope:** **Companion mode** — Q&A + **Continue story** stretch (not full co-author rewrite)
 
 ---
 
@@ -181,3 +181,22 @@ Add a clearly labeled Colab section **after** stitch/export:
 ## 8. One-Line Summary for the Group
 
 **Companion mode** turns the storyteller from a one-shot emotive audiobook into a **context-aware listening buddy**: same book memory and LLM router, plus accumulating Q&A, without rewriting the story or shipping a custom LLM.
+
+---
+
+## 9. Implementation status (2026-08-06)
+
+**Status:** Implemented in the Streamlit app (`app.py` + `pipeline/companion.py`, `continue_story.py`, `asr.py`).
+
+| Addendum concept | Shipped as |
+| :--- | :--- |
+| Listener Q&A (text) | Typed question + Companion reasoner |
+| Voice questions | Whisper ASR (`pipeline/asr.py`) + custom mic component |
+| Spoken answers | XTTS `speak_reply` in narrator voice |
+| Session memory | In-memory `companion_chat` + `CompanionSession` canon/progress |
+| Chronological UI | `story_timeline` — chapters, Q&A, continues in order |
+| Continue story | **Stretch beyond original read-only Companion:** LLM next beat + XTTS, appended to timeline and full-story audio |
+
+Not yet shipped from this addendum: Chroma `session_turns` on Drive, Colab notebook cells, strict spoiler-decline policy tests, “remember this” pins.
+
+See [`CHANGES.md`](../CHANGES.md) and [`README.md`](../README.md) for run instructions.

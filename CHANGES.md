@@ -68,7 +68,7 @@ Vision / picture / camera stories still generate directly in the selected langua
 ## Tests & docs
 
 - New/updated: translate, companion, continue/ASR, theatre, orchestrator, story_gen tests.
-- `README.md` rewritten for XTTS default, Companion, translation.
+- `README.md`, `CHANGES.md`, design spec §11, Companion addendum §9 updated (2026-08-06).
 
 ## Not committed
 
