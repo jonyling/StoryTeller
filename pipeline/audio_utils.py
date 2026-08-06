@@ -7,6 +7,20 @@ from pipeline.errors import ValidationError
 
 _BRACKET_TAG_PATTERN = re.compile(r"\[[^\]]*\]")
 
+# How far below the narration's OWN measured loudness ambience should sit.
+# A fixed absolute attenuation (the -18dB this replaces, carried over from
+# the now-removed pipeline/mixer.py) assumes the raw ambience clip already
+# sits near narration's loudness. Real Freesound ambience clips are often
+# already quiet (~-25dBFS) relative to XTTS narration (~-20 to -25dBFS), so
+# a further fixed -18dB attenuation pushed ambience down to ~-43dBFS —
+# effectively inaudible. Ducking relative to narration's actual level keeps
+# it a consistent amount below the voice regardless of how loud either
+# clip started out.
+_AMBIENCE_RELATIVE_DB = -12
+# Fallback target when narration is digital silence (dBFS == -inf) and there
+# is no useful "below narration" reference to duck relative to.
+_AMBIENCE_SILENT_NARRATION_FALLBACK_DBFS = -25.0
+
 
 def get_duration_seconds(audio_bytes: bytes) -> float:
     segment = AudioSegment.from_file(io.BytesIO(audio_bytes))
@@ -69,3 +83,38 @@ def slice_audio_by_sentences(
         clip.export(buffer, format="mp3")
         clips.append(buffer.getvalue())
     return clips
+
+
+def mix_ambience_under_narration(narration_bytes: bytes, ambience_bytes: bytes | None) -> bytes:
+    """Loop/trim ambience to narration's length, duck it, and overlay under it.
+
+    Returns WAV bytes (the format every per-sentence clip already uses).
+    With no ambience, narration is returned unchanged.
+    """
+    if not ambience_bytes:
+        return narration_bytes
+
+    narration = AudioSegment.from_file(io.BytesIO(narration_bytes))
+    ambience = _loop_to_length(AudioSegment.from_file(io.BytesIO(ambience_bytes)), len(narration))
+
+    narration_dbfs = narration.dBFS
+    if narration_dbfs == float("-inf"):
+        narration_dbfs = _AMBIENCE_SILENT_NARRATION_FALLBACK_DBFS
+    target_dbfs = narration_dbfs + _AMBIENCE_RELATIVE_DB
+    if ambience.dBFS != float("-inf"):
+        ambience = ambience.apply_gain(target_dbfs - ambience.dBFS)
+
+    mixed = narration.overlay(ambience)
+
+    buffer = io.BytesIO()
+    mixed.export(buffer, format="wav")
+    return buffer.getvalue()
+
+
+def _loop_to_length(segment: AudioSegment, target_length_ms: int) -> AudioSegment:
+    if len(segment) == 0 or target_length_ms <= 0:
+        return segment
+    if len(segment) < target_length_ms:
+        loops_required = (target_length_ms // len(segment)) + 1
+        segment = segment * loops_required
+    return segment[:target_length_ms]

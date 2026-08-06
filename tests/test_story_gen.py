@@ -76,6 +76,64 @@ def test_openai_story_generator_empty_content_raises_pipeline_error():
         generator.generate(_sample_images(1), "English")
 
 
+def test_openai_story_generator_merges_tag_only_sentence_into_previous():
+    # The model is instructed to put delivery tags like [whispers] inline
+    # within a sentence's text, but sometimes emits one as its own separate
+    # list entry instead. Left standalone, that becomes a phantom sentence
+    # with no speakable content: strip_delivery_tags empties it, so it gets
+    # a silent TTS clip, yet its raw "[whispers]" text still shows up in the
+    # UI as if it were a real sentence. Fold it into the previous sentence.
+    fake_client = MagicMock()
+    payload = {
+        "sentences": [
+            {
+                "text": "Benny listened to the thunder rumble outside his window.",
+                "speaker": "narrator",
+                "emotion": "angry",
+            },
+            {"text": "[whispers]", "speaker": "narrator", "emotion": "calm"},
+            {
+                "text": "Benny felt a bit scared as lightning flashed across the sky.",
+                "speaker": "narrator",
+                "emotion": "sad",
+            },
+        ]
+    }
+    fake_client.chat.completions.create.return_value.choices = [
+        MagicMock(message=MagicMock(content=json.dumps(payload)))
+    ]
+    generator = OpenAIStoryGenerator(fake_client)
+
+    result = generator.generate(_sample_images(1), "English")
+
+    assert len(result.sentences) == 2
+    assert result.sentences[0].text == (
+        "Benny listened to the thunder rumble outside his window. [whispers]"
+    )
+    assert result.sentences[0].emotion == "angry"  # unaffected by the merged-in tag
+    assert result.sentences[1].text == "Benny felt a bit scared as lightning flashed across the sky."
+
+
+def test_openai_story_generator_keeps_leading_tag_only_sentence_when_no_previous():
+    fake_client = MagicMock()
+    payload = {
+        "sentences": [
+            {"text": "[gasps]", "speaker": "narrator", "emotion": "neutral"},
+            {"text": "A real sentence follows.", "speaker": "narrator", "emotion": "neutral"},
+        ]
+    }
+    fake_client.chat.completions.create.return_value.choices = [
+        MagicMock(message=MagicMock(content=json.dumps(payload)))
+    ]
+    generator = OpenAIStoryGenerator(fake_client)
+
+    result = generator.generate(_sample_images(1), "English")
+
+    # No previous sentence to fold into — kept as-is rather than dropped or crashing.
+    assert len(result.sentences) == 2
+    assert result.sentences[0].text == "[gasps]"
+
+
 def test_openai_story_generator_falls_back_to_neutral_for_unknown_emotion():
     fake_client = MagicMock()
     payload = {"sentences": [{"text": "Hello.", "speaker": "narrator", "emotion": "confused"}]}

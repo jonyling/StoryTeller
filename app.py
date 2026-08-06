@@ -8,7 +8,6 @@ picked in the header. Adding a fifth theme means adding one dict to THEMES
 and nothing else — the stylesheet only ever reads T[...].
 """
 
-import base64
 import io
 import os
 import re
@@ -324,9 +323,7 @@ def _st_play_wav(
     download_name: str = "clip.wav",
     key: str | None = None,
 ) -> None:
-    """Brave/Chrome-friendly player: stereo/48k + file URL + MP3 + download."""
-    import streamlit.components.v1 as components
-
+    """Brave/Chrome-friendly player: stereo/48k + MP3 + download."""
     if not isinstance(wav_bytes, (bytes, bytearray)) or not wav_bytes:
         return
     play = _for_browser_playback(bytes(wav_bytes))
@@ -355,27 +352,6 @@ def _st_play_wav(
     else:
         st.audio(play, format="audio/wav")
 
-    # Isolated Blob player — another Brave path when Streamlit media is muted
-    b64 = base64.b64encode(mp3_bytes or play).decode("ascii")
-    mime = "audio/mpeg" if mp3_bytes else "audio/wav"
-    components.html(
-        f"""
-<!DOCTYPE html><html><body style="margin:0;background:transparent;">
-<audio id="a" controls preload="auto" style="width:100%;height:36px;"></audio>
-<script>
-(function(){{
-  const b64="{b64}";
-  const bin=atob(b64);
-  const bytes=new Uint8Array(bin.length);
-  for(let i=0;i<bin.length;i++) bytes[i]=bin.charCodeAt(i);
-  const a=document.getElementById("a");
-  a.src=URL.createObjectURL(new Blob([bytes],{{type:"{mime}"}}));
-  a.volume=1.0;
-}})();
-</script></body></html>
-""",
-        height=48,
-    )
     st.download_button(
         f"Download · {download_name.replace('.wav', '.mp3' if mp3_bytes else '.wav')}",
         data=mp3_bytes or play,
@@ -1502,17 +1478,9 @@ html, body, [class*="css"], .stMarkdown{{ font-family:{T['f_ui']}; color:var(--i
    so it's left as the documented limit of a display-layer-only fix. */
 /* Do NOT style native <audio> (background/border/filter/height). Chromium can
    keep the scrubber moving while sending silence — especially on headphone
-   devices. Leave players unstyled; only hide the looping ambience widget. */
-.cs-ambience + div[data-testid="stAudio"],
-.cs-ambience ~ div[data-testid="stAudio"]:last-of-type{{
-  position:absolute !important; width:1px !important; height:1px !important;
-  opacity:0 !important; pointer-events:none !important; overflow:hidden !important;
-}}
-.cs-amb-tag{{ position:absolute; z-index:2; left:16px; bottom:14px;
-  display:inline-flex; align-items:center; gap:6px; font-family:{T['f_mono']};
-  font-size:11px; font-weight:{T['count_w']}; opacity:.55; }}
-.cs-amb-tag i{{ width:6px; height:6px; border-radius:999px; background:currentColor;
-  animation:cs-bounce 1.6s ease-in-out infinite; }}
+   devices. Leave players unstyled. Ambience is mixed server-side into each
+   sentence's own clip (pipeline.audio_utils.mix_ambience_under_narration),
+   not played as a separate widget, so there's nothing to hide here. */
 
 .cs-progress{{ display:flex; gap:{T['prog_gap']}; align-items:center;
   margin:calc(var(--step)*3) 0 calc(var(--step)*1.5); }}

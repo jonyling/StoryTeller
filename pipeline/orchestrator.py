@@ -4,7 +4,7 @@ from __future__ import annotations
 import concurrent.futures
 from collections import OrderedDict
 
-from pipeline.audio_utils import slice_audio_by_sentences
+from pipeline.audio_utils import mix_ambience_under_narration, slice_audio_by_sentences
 from pipeline.prosody import EMOTION_DSP_DEFAULTS
 from pipeline.sfx import fetch_ambience_clip
 from pipeline.theatre import RuleBasedTheatreAdapter, theatre_lines_to_script_doc
@@ -148,6 +148,10 @@ def run_pipeline(
     by_page: OrderedDict[int, list] = OrderedDict()
     for line, clip_bytes, page_no in zip(theatre_lines, clips, page_nums):
         dsp = EMOTION_DSP_DEFAULTS.get(line.emotion, EMOTION_DSP_DEFAULTS["neutral"])
+        if clip_bytes and enable_sfx:
+            ambience_clip = ambience_by_emotion.get(line.emotion)
+            if ambience_clip:
+                clip_bytes = mix_ambience_under_narration(clip_bytes, ambience_clip)
         by_page.setdefault(int(page_no), []).append(
             {
                 "text": line.text,

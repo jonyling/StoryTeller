@@ -6,6 +6,7 @@ import re
 from google.genai import types as genai_types
 
 from pipeline.errors import PipelineError
+from pipeline.prosody import strip_delivery_tags
 
 _LANGUAGE_NAMES = {"English": "English", "Mandarin": "Mandarin Chinese"}
 VALID_EMOTIONS = {"angry", "excited", "sad", "calm", "neutral"}
@@ -118,7 +119,24 @@ def _parse_story_payload(raw_json: str) -> StoryResult:
         )
         for item in sentences_raw
     ]
-    return StoryResult(sentences)
+    return StoryResult(_merge_tag_only_sentences(sentences))
+
+
+def _merge_tag_only_sentences(sentences: list) -> list:
+    """Fold a sentence whose text is ONLY delivery tags (e.g. the model is
+    told to put [whispers]/[gasps] inline within a sentence's text, but
+    sometimes emits one as its own list entry instead) into the previous
+    sentence. Left standalone it has no speakable content — strip_delivery_tags
+    empties it, so it becomes a silent phantom TTS clip whose raw "[whispers]"
+    text still shows up as if it were a real sentence in the UI.
+    """
+    merged: list = []
+    for sentence in sentences:
+        if not strip_delivery_tags(sentence.text) and merged:
+            merged[-1].text = f"{merged[-1].text} {sentence.text}".strip()
+            continue
+        merged.append(sentence)
+    return merged
 
 
 def _generate_via_openai_compatible_chat(client, model: str, images, language: str) -> StoryResult:
