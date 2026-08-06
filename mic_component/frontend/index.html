@@ -4,35 +4,47 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <style>
-    :root { color-scheme: dark; }
+    :root {
+      /* Defaults match the old hardcoded dark look; a Python-side theme
+         passes real values via postMessage args on each render (see the
+         streamlit:render listener below), so this panel matches whichever
+         of the 4 app themes is active instead of always being a black slab. */
+      --mic-bg: transparent;
+      --mic-ink: #e8e2d6;
+      --mic-border: rgba(246,241,232,.2);
+      --mic-field-bg: #1a1c22;
+      --mic-cta: #c45c48;
+      --mic-cta-ink: #fff;
+    }
     body {
       margin: 0;
       font: 13px/1.35 system-ui, sans-serif;
-      color: #e8e2d6;
+      color: var(--mic-ink);
       background: transparent;
     }
     .box {
-      border: 1px solid rgba(246,241,232,.2);
+      border: 1px solid var(--mic-border);
       border-radius: 10px;
       padding: 10px 12px;
+      background: var(--mic-bg);
     }
     .row { display: flex; align-items: center; gap: 8px; margin-top: 8px; flex-wrap: wrap; }
     select, button {
       font: inherit;
       border-radius: 6px;
-      border: 1px solid rgba(246,241,232,.25);
-      background: #1a1c22;
-      color: #e8e2d6;
+      border: 1px solid var(--mic-border);
+      background: var(--mic-field-bg);
+      color: var(--mic-ink);
       padding: 6px 10px;
     }
     select { flex: 1; min-width: 160px; }
     button { cursor: pointer; }
-    button.primary { background: #c45c48; border-color: #c45c48; color: #fff; }
+    button.primary { background: var(--mic-cta); border-color: var(--mic-cta); color: var(--mic-cta-ink); }
     button.danger { background: #555; border-color: #555; color: #fff; }
     button:disabled { opacity: .45; cursor: not-allowed; }
     #bar {
       flex: 1; min-width: 120px; height: 12px;
-      background: rgba(246,241,232,.12); border-radius: 999px; overflow: hidden;
+      background: rgba(128,128,128,.25); border-radius: 999px; overflow: hidden;
     }
     #fill { height: 100%; width: 0%; background: #7dcea0; }
     #pct { width: 42px; text-align: right; font-variant-numeric: tabular-nums; }
@@ -473,8 +485,21 @@
       setStatus("Mic changed. Click Check level to verify the bar moves, then Record.");
     });
 
+    function applyTheme(args) {
+      if (!args) return;
+      const root = document.documentElement.style;
+      const map = {
+        bg: "--mic-bg", ink: "--mic-ink", border: "--mic-border",
+        fieldBg: "--mic-field-bg", cta: "--mic-cta", ctaInk: "--mic-cta-ink",
+      };
+      for (const [argKey, cssVar] of Object.entries(map)) {
+        if (args[argKey]) root.setProperty(cssVar, args[argKey]);
+      }
+    }
+
     window.addEventListener("message", (event) => {
       if (event.data?.type === "streamlit:render") {
+        applyTheme(event.data.args);
         Streamlit.setFrameHeight(document.body.scrollHeight);
       }
     });

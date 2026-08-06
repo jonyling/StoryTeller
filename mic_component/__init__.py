@@ -15,9 +15,32 @@ _FRONTEND = os.path.join(os.path.dirname(__file__), "frontend")
 _recorder = components.declare_component("storyteller_mic_recorder", path=_FRONTEND)
 
 
-def record_voice(*, key: str | None = None) -> dict[str, Any] | None:
-    """Render mic check + recorder. Returns ``{"mime", "data_b64", "peak"}`` or None."""
-    return _recorder(key=key, default=None)
+def record_voice(
+    *,
+    key: str | None = None,
+    bg: str | None = None,
+    ink: str | None = None,
+    border: str | None = None,
+    field_bg: str | None = None,
+    cta: str | None = None,
+    cta_ink: str | None = None,
+) -> dict[str, Any] | None:
+    """Render mic check + recorder. Returns ``{"mime", "data_b64", "peak"}`` or None.
+
+    The optional color args theme the panel to match the active app theme
+    (see mic_component/frontend/index.html's applyTheme()) instead of the
+    hardcoded dark look it had before.
+    """
+    return _recorder(
+        key=key,
+        default=None,
+        bg=bg,
+        ink=ink,
+        border=border,
+        fieldBg=field_bg,
+        cta=cta,
+        ctaInk=cta_ink,
+    )
 
 
 def recording_to_wav_bytes(payload: dict[str, Any]) -> tuple[bytes, float]:

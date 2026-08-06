@@ -54,6 +54,7 @@ st.set_page_config(page_title="Context-Aware Storyteller", page_icon="📖",
                    layout="centered", initial_sidebar_state="collapsed")
 
 for k, v in {"theme": "Classic", "lang": "EN", "sfx": False, "story": None,
+             "story_lang": None,
              "used_fallback": False, "source": "PDF", "illustration": None,
              "voice_mode": "Default", "voice_preset": "warm", "own_voice_method": "Upload",
              "idx": 0, "dir": "fwd", "autoplay": False,
@@ -82,7 +83,7 @@ if TTS_BACKEND == "elevenlabs":
 else:
     MIN_VOICE_SECONDS = XTTS_MIN_REF_SECONDS
     MAX_VOICE_SECONDS = XTTS_MAX_REF_SECONDS
-SFX_CACHE_DIR = os.path.join(tempfile.gettempdir(), "storyteller_sfx_cache")
+SFX_CACHE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "assets", "sfx_cache")
 STORY_LANGUAGE = {"EN": "English", "ZH": "Mandarin"}
 
 # ---------------------------------------------------------------------------
@@ -346,20 +347,20 @@ def _st_play_wav(
     except Exception:
         mp3_bytes = None
 
-    st.caption(label)
-    if mp3_bytes:
-        st.audio(mp3_bytes, format="audio/mp3")
-    else:
-        st.audio(play, format="audio/wav")
-
-    st.download_button(
-        f"Download · {download_name.replace('.wav', '.mp3' if mp3_bytes else '.wav')}",
-        data=mp3_bytes or play,
-        file_name=download_name.replace(".wav", ".mp3") if mp3_bytes else download_name,
-        mime="audio/mpeg" if mp3_bytes else "audio/wav",
-        use_container_width=True,
-        key=f"dl_{safe_key}_{len(play)}",
-    )
+    with st.container(border=True):
+        st.caption(label)
+        if mp3_bytes:
+            st.audio(mp3_bytes, format="audio/mp3")
+        else:
+            st.audio(play, format="audio/wav")
+        st.download_button(
+            f"{C['download']} · {download_name.replace('.wav', '.mp3' if mp3_bytes else '.wav')}",
+            data=mp3_bytes or play,
+            file_name=download_name.replace(".wav", ".mp3") if mp3_bytes else download_name,
+            mime="audio/mpeg" if mp3_bytes else "audio/wav",
+            use_container_width=True,
+            key=f"dl_{safe_key}_{len(play)}",
+        )
 
 
 def _chapter_from_pages(pages, *, title: str) -> dict:
@@ -440,14 +441,15 @@ def _preview_wav_bytes(wav_bytes: bytes, *, peak: float) -> None:
     preview_dir.mkdir(parents=True, exist_ok=True)
     preview_path = preview_dir / "latest_preview.wav"
     preview_path.write_bytes(play_bytes)
-    st.audio(str(preview_path), format="audio/wav")
-    st.download_button(
-        "Download preview WAV",
-        data=wav_bytes,
-        file_name="voice_preview.wav",
-        mime="audio/wav",
-        use_container_width=True,
-    )
+    with st.container(border=True):
+        st.audio(str(preview_path), format="audio/wav")
+        st.download_button(
+            C["download_preview"],
+            data=wav_bytes,
+            file_name="voice_preview.wav",
+            mime="audio/wav",
+            use_container_width=True,
+        )
 
 
 def _build_story_provider_client():
@@ -922,6 +924,8 @@ DEFAULT_VOICES = {
                "path": "assets/voices/bright.wav"},
     "gentle": {"EN": "Gentle bedtime",   "ZH": "轻声哄睡",       "face": "🌙",
                "path": "assets/voices/gentle.wav"},
+    "minion":  {"EN": "Minion",          "ZH": "小黄人",         "face": "🍌",
+               "path": "assets/voices/minion.wav"},
 }
 
 # Looping background atmosphere, one file per emotion. Point these at your own
@@ -986,9 +990,8 @@ THEMES = {
         "audio_pad": "0", "audio_wrap_bg": "transparent",
         "audio_wrap_border": "1px solid rgba(246,241,232,.09)",
         "audio_wrap_radius": "0 0 18px 18px",
-        # Don't invert <audio> — Chromium often plays silent/broken media when
-        # CSS filter is applied to the native player (voice recordings included).
-        "audio_filter": "none",
+        "audio_filter": "invert(92%) hue-rotate(180deg) contrast(.92) saturate(.6)",
+        "disabled_ink": "#9A9384",
         "wave_h": "26px", "wave_radius": "2px", "wave_op": ".55",
         "progress": "bars", "prog_h": "3px", "prog_radius": "2px", "prog_gap": "4px",
         "prog_track": "rgba(246,241,232,.10)",
@@ -1055,6 +1058,7 @@ THEMES = {
         "audio_wrap_border": "3px solid #2A2520",
         "audio_wrap_radius": "0 0 24px 8px",
         "audio_filter": "none",
+        "disabled_ink": "#5A5148",
         "wave_h": "30px", "wave_radius": "3px", "wave_op": ".85",
         "progress": "bars", "prog_h": "9px", "prog_radius": "5px", "prog_gap": "5px",
         "prog_track": "rgba(42,37,32,.12)",
@@ -1102,8 +1106,8 @@ THEMES = {
         "cta_border": "3px solid #1B2A4A",
         "card_border": "3px solid #1B2A4A", "card_radius": "18px",
         "card_pad_y": "40px", "card_pad_x": "36px",
-        "card_shadow": "0 0 0 4px #FFFFFF, 0 8px 16px -2px rgba({glow},.4)",
-        "spine": "rgba(27,42,74,.10)", "curl": "rgba(27,42,74,.08)",
+        "card_shadow": "0 6px 0 #1B2A4A, 0 0 0 4px #FFFFFF inset",
+        "spine": "rgba(27,42,74,.10)", "curl": "transparent",
         "story_size": "clamp(21px,5vw,29px)", "story_style": "normal",
         "story_w": "600",
         "meta_size": "12px", "meta_ls": ".12em", "meta_tt": "uppercase",
@@ -1119,6 +1123,7 @@ THEMES = {
         "audio_wrap_border": "3px solid #1B2A4A",
         "audio_wrap_radius": "0 0 15px 15px",
         "audio_filter": "none",
+        "disabled_ink": "#3D4A63",
         "wave_h": "26px", "wave_radius": "2px", "wave_op": ".9",
         "progress": "dots", "prog_h": "14px", "prog_radius": "999px",
         "prog_gap": "7px", "prog_track": "#FFFFFF",
@@ -1183,6 +1188,7 @@ THEMES = {
         "audio_wrap_border": "2px solid #C7BBE0",
         "audio_wrap_radius": "0 0 24px 10px",
         "audio_filter": "none",
+        "disabled_ink": "#5C5175",
         "wave_h": "22px", "wave_radius": "3px", "wave_op": ".8",
         "progress": "track", "prog_h": "8px", "prog_radius": "5px",
         "prog_gap": "0", "prog_track": "#FFFFFF",
@@ -1258,11 +1264,31 @@ st.html(f"""
 header[data-testid="stHeader"]{{ background:transparent; }}
 html, body, [class*="css"], .stMarkdown{{ font-family:{T['f_ui']}; color:var(--ink); }}
 
+/* Section headings (st.subheader/markdown ####) fall through to Streamlit's
+   own dark-mode-aware default otherwise, which is near-white — invisible on
+   the three light themes. Pin explicitly to the theme's ink color. */
+h1, h2, h3, h4, [data-testid="stHeading"] h1, [data-testid="stHeading"] h2,
+[data-testid="stHeading"] h3, [data-testid="stHeading"] h4{{
+  color:{T['ink']} !important; font-family:{T['f_display']};
+  -webkit-text-fill-color:{T['ink']} !important; }}
+
 /* Picker row container (st.container(border=True)) */
 [data-testid="stVerticalBlockBorderWrapper"]{{
   background:{T['surface']}; border:{T['card_border']} !important;
   border-radius:{T['up_radius']}; padding:calc(var(--step)*1.5) calc(var(--step)*2);
   margin-bottom:calc(var(--step)*3); }}
+
+/* Manual eyebrow label — matches the auto-generated segmented_control label
+   style, for spots (like the Setup card's "2 · WHO READS IT?" column) that
+   need the same look but aren't a widget's own label. */
+.cs-eyebrow{{ font-family:{T['f_mono']}; font-size:11px; letter-spacing:.1em;
+  text-transform:uppercase; color:var(--muted) !important; margin:0 0 8px; }}
+
+/* Setup card: story-source + voice as two equal-weight columns with a
+   hairline divider, so the empty space under a short uploader reads as a
+   deliberate column boundary instead of a stray gap. */
+.st-key-setup_card [data-testid="stHorizontalBlock"] > [data-testid="stColumn"]:first-child{{
+  border-right:1px solid var(--hair); padding-right:calc(var(--step)*3); }}
 
 /* Segmented control — Streamlit renders options as
    stBaseButton-segmented_control (unselected) / -segmented_controlActive
@@ -1350,11 +1376,17 @@ html, body, [class*="css"], .stMarkdown{{ font-family:{T['f_ui']}; color:var(--i
   border:2px dashed {T['ink_faint']} !important; }}
 .stButton > button:disabled, .stButton > button:disabled p,
 .stButton > button:disabled span, .stButton > button:disabled div{{
-  color:var(--muted) !important; -webkit-text-fill-color:var(--muted) !important; }}
+  color:{T['disabled_ink']} !important; -webkit-text-fill-color:{T['disabled_ink']} !important; }}
 .stButton > button[kind="primary"]{{ background:{T['cta_bg']}; color:{T['cta_ink']};
   border:{T['cta_border']}; font-weight:800; box-shadow:{T['btn_shadow']}; }}
 .cs-need{{ text-align:center; font-size:13px; color:var(--muted) !important;
   margin:calc(var(--step)*1) 0 0; }}
+
+/* Commit strip — reuses the .cs-step chip look from the empty state to show
+   "is the story ready? is the voice ready?" before the CTA. */
+.cs-commit{{ display:flex; align-items:center; justify-content:center; gap:12px;
+  flex-wrap:wrap; margin:0 0 calc(var(--step)*2); }}
+.cs-commit-arrow{{ color:var(--faint); font-size:14px; }}
 
 .cs-empty{{ position:relative; overflow:hidden; text-align:center;
   border:{T['empty_border']}; border-radius:{T['empty_radius']};
@@ -1476,11 +1508,45 @@ html, body, [class*="css"], .stMarkdown{{ font-family:{T['f_ui']}; color:var(--i
    is shared by every widget on the page — closing it here would mean
    overriding that gap globally, at the cost of spacing everywhere else,
    so it's left as the documented limit of a display-layer-only fix. */
-/* Do NOT style native <audio> (background/border/filter/height). Chromium can
-   keep the scrubber moving while sending silence — especially on headphone
-   devices. Leave players unstyled. Ambience is mixed server-side into each
-   sentence's own clip (pipeline.audio_utils.mix_ambience_under_narration),
-   not played as a separate widget, so there's nothing to hide here. */
+/* Ambience is mixed server-side into each sentence's own clip
+   (pipeline.audio_utils.mix_ambience_under_narration), not played as a
+   separate widget — so the only styling needed here is the native player
+   itself, per the comment above. */
+/* Only width/height/radius on the native element — height:44px + padding +
+   a 999px pill previously crushed the control panel down to a strip with
+   no visible play triangle/scrubber/volume in the light themes. Border and
+   background live on the wrapper container below instead. */
+audio[data-testid="stAudio"]{{ display:block !important;
+  width:100% !important; height:44px !important; border-radius:12px !important; }}
+audio[data-testid="stAudio"]::-webkit-media-controls-panel{{
+  background-color:{T['audio_wrap_bg']} !important; }}
+audio[data-testid="stAudio"]::-webkit-media-controls-current-time-display,
+audio[data-testid="stAudio"]::-webkit-media-controls-time-remaining-display{{
+  color:{T['ink']} !important; }}
+
+/* Themed shell every audio player sits inside — a real st.container(border=True)
+   detected via :has(), not a hand-written div (those don't nest around
+   sibling widgets and render as empty ghost boxes instead). */
+[data-testid="stVerticalBlockBorderWrapper"]:has(audio[data-testid="stAudio"]){{
+  background:{T['surface']} !important; border:{T['card_border']} !important;
+  border-radius:{T['card_radius']}; padding:12px 14px; }}
+
+/* Download buttons default to a near-black slab in every theme; pull them
+   from the same tokens as regular buttons so they read as secondary, not
+   off-palette chrome. */
+[data-testid="stDownloadButton"] button{{
+  background:{T['surface']} !important; color:{T['ink']} !important;
+  border:{T['card_border']} !important; border-radius:{T['btn_radius']} !important;
+  font-family:{T['btn_font']}; font-weight:{T['btn_w']}; }}
+[data-testid="stDownloadButton"] button:hover{{ transform:translateY(-1px); }}
+
+/* Companion Q&A uses st.chat_message, which renders as flat Streamlit-grey
+   by default — give it the same page-corner card treatment as story cards. */
+[data-testid="stChatMessage"]{{
+  background:{T['surface']} !important; border:{T['card_border']};
+  border-radius:{T['card_radius']}; padding:calc(var(--step)*2);
+  margin:calc(var(--step)*1.5) 0; }}
+[data-testid="stChatMessage"] p{{ color:{T['ink']} !important; }}
 
 .cs-progress{{ display:flex; gap:{T['prog_gap']}; align-items:center;
   margin:calc(var(--step)*3) 0 calc(var(--step)*1.5); }}
@@ -1557,31 +1623,62 @@ with st.container(border=True):
 # INPUTS
 # ---------------------------------------------------------------------------
 
-if st.session_state.source is None:
-    # segmented_control deselects (-> None) if its active option is clicked
-    # again; a widget-bound key can't be reassigned after instantiation, so
-    # this must run before the widget below, not after.
-    st.session_state.source = "PDF"
-srcs = {"PDF": C["src_pdf"], "Picture": C["src_img"], "Camera": C["src_cam"]}
-if hasattr(st, "segmented_control"):
-    st.segmented_control(C["src_label"], list(srcs),
-                         format_func=lambda k: srcs[k], key="source")
-else:
-    st.radio(C["src_label"], list(srcs), format_func=lambda k: srcs[k],
-             key="source", horizontal=True)
-src = st.session_state.source
+# Only Theme/Language/Ambience stay changeable once a story exists — every
+# other setup control is disabled (not hidden, so its value keeps resolving
+# normally below) and the whole card collapses into a summary.
+locked = bool(st.session_state.story)
 
-c1, c2 = st.columns(2, gap="medium")
+if locked:
+    if st.session_state.voice_mode == "Own":
+        voice_summary = C["v_own"]
+    else:
+        vp = st.session_state.voice_preset
+        voice_summary = f'{DEFAULT_VOICES[vp]["face"]} {DEFAULT_VOICES[vp][LANG]}'
+    src_face = {"PDF": "📄", "Picture": "🖼", "Camera": "📷"}.get(st.session_state.source, "📄")
+    src_summary = {"PDF": C["src_pdf"], "Picture": C["src_img"], "Camera": C["src_cam"]}[st.session_state.source]
+    lock_kicker = "设置已锁定" if LANG == "ZH" else "Settings · locked"
+    story_lang_name = "中文" if st.session_state.story_lang == "ZH" else "English"
+    story_lang_field = f"故事语言：{story_lang_name}" if LANG == "ZH" else f"Story language: {story_lang_name}"
+    locked_label = f"🔒 {lock_kicker} — {src_face} {src_summary} · {voice_summary} · {story_lang_field}"
+    setup_card = st.expander(locked_label, expanded=False)
+else:
+    setup_card = st.container(border=True, key="setup_card")
+
+with setup_card:
+    c1, c2 = st.columns([1, 1], gap="large")
+
 with c1:
+    step2_label = "2 · 谁来读？" if LANG == "ZH" else "2 · Who reads it?"
+    st.html(f'<p class="cs-eyebrow">1 · {C["src_label"]}</p>')
+    if st.session_state.source is None:
+        # segmented_control deselects (-> None) if its active option is clicked
+        # again; a widget-bound key can't be reassigned after instantiation, so
+        # this must run before the widget below, not after.
+        st.session_state.source = "PDF"
+    srcs = {"PDF": C["src_pdf"], "Picture": C["src_img"], "Camera": C["src_cam"]}
+    if hasattr(st, "segmented_control"):
+        st.segmented_control(C["src_label"], list(srcs),
+                             format_func=lambda k: srcs[k], key="source",
+                             label_visibility="collapsed", disabled=locked)
+    else:
+        st.radio(C["src_label"], list(srcs), format_func=lambda k: srcs[k],
+                 key="source", horizontal=True, label_visibility="collapsed",
+                 disabled=locked)
+    src = st.session_state.source
+
     if src == "PDF":
-        story_file = st.file_uploader(C["up_pdf"], type=["pdf"])
+        story_file = st.file_uploader(C["up_pdf"], type=["pdf"], key="story_pdf_uploader",
+                                      disabled=locked)
     elif src == "Camera":
         st.caption(C["cam_hint"])
-        story_file = st.camera_input(C["src_cam"], label_visibility="collapsed")
+        story_file = st.camera_input(C["src_cam"], label_visibility="collapsed",
+                                     key="story_camera_input", disabled=locked)
     else:
         story_file = st.file_uploader(C["up_img"],
-                                      type=["png", "jpg", "jpeg", "webp"])
+                                      type=["png", "jpg", "jpeg", "webp"],
+                                      key="story_img_uploader", disabled=locked)
 with c2:
+    st.html(f'<p class="cs-eyebrow">{step2_label}</p>')
     if st.session_state.voice_mode is None:
         st.session_state.voice_mode = "Default"
     if st.session_state.own_voice_method is None:
@@ -1590,10 +1687,12 @@ with c2:
     if hasattr(st, "segmented_control"):
         st.segmented_control(C["v_label"], list(vmodes),
                              format_func=lambda k: vmodes[k],
-                             key="voice_mode", label_visibility="collapsed")
+                             key="voice_mode", label_visibility="collapsed",
+                             disabled=locked)
     else:
         st.radio(C["v_label"], list(vmodes), format_func=lambda k: vmodes[k],
-                 key="voice_mode", horizontal=True, label_visibility="collapsed")
+                 key="voice_mode", horizontal=True, label_visibility="collapsed",
+                 disabled=locked)
 
     if st.session_state.voice_mode == "Own":
         own_methods = {"Upload": C["own_upload"], "Record": C["own_record"]}
@@ -1604,6 +1703,7 @@ with c2:
                 format_func=lambda k: own_methods[k],
                 key="own_voice_method",
                 label_visibility="collapsed",
+                disabled=locked,
             )
         else:
             st.radio(
@@ -1613,6 +1713,7 @@ with c2:
                 key="own_voice_method",
                 horizontal=True,
                 label_visibility="collapsed",
+                disabled=locked,
             )
         if st.session_state.own_voice_method == "Record":
             if st.session_state.story:
@@ -1629,7 +1730,11 @@ with c2:
                     "Streamlit’s old recorder often used a different (silent) device. "
                     "Use this panel: Listen until the bar moves, then Record/Stop on the **same** mic."
                 )
-                payload = record_voice(key="storyteller_mic")
+                payload = record_voice(
+                    key="storyteller_mic",
+                    bg=T["surface"], ink=T["ink"], border=T["card_border"],
+                    field_bg=T["btn_bg"], cta=T["cta_bg"], cta_ink=T["cta_ink"],
+                )
                 voice_file = None
                 if payload and payload.get("data_b64"):
                     try:
@@ -1645,7 +1750,8 @@ with c2:
                     voice_file = _BytesVoice(wav_bytes, "recording.wav")
                     _preview_wav_bytes(wav_bytes, peak=0.5)
         else:
-            voice_file = st.file_uploader(C["up_voice"], type=["wav", "mp3", "m4a", "webm", "ogg"])
+            voice_file = st.file_uploader(C["up_voice"], type=["wav", "mp3", "m4a", "webm", "ogg"],
+                                          key="voice_file_uploader", disabled=locked)
             if voice_file is not None:
                 try:
                     raw = _read_voice_bytes(voice_file)
@@ -1665,7 +1771,8 @@ with c2:
             C["v_pick"], keys,
             index=keys.index(st.session_state.voice_preset),
             format_func=lambda k: f'{DEFAULT_VOICES[k]["face"]}  '
-                                  f'{DEFAULT_VOICES[k][LANG]}')
+                                  f'{DEFAULT_VOICES[k][LANG]}',
+            key="voice_preset_select", disabled=locked)
         st.session_state.voice_preset = pick
         path = _voice_asset_path(DEFAULT_VOICES[pick]["path"])
         voice_file = str(path) if path.exists() else None
@@ -1679,16 +1786,47 @@ with c2:
                 peak = float(seg.max) / float(seg.max_possible_amplitude or 1)
                 _preview_wav_bytes(raw if raw[:4] == b"RIFF" else raw, peak=peak)
             except Exception:
-                st.audio(voice_file)
+                with st.container(border=True):
+                    st.audio(voice_file)
         else:
             st.warning(C["v_missing"])
 
+if locked:
+    if st.button(
+        "🔄 " + ("修改设置并重新开始" if LANG == "ZH" else "Change settings & start over"),
+        use_container_width=True,
+    ):
+        for k in ("story", "story_lang", "full_story_audio", "story_chapters", "dir", "autoplay",
+                  "used_fallback", "illustration", "narrator_voice_bytes",
+                  "companion_session", "ambience_by_emotion", "theatre_script",
+                  "recorded_voice_wav", "pending_question_wav", "last_question_wav",
+                  "last_ask_sig"):
+            st.session_state[k] = None
+        st.session_state.idx = 0
+        st.rerun()
+
 ready = bool(story_file and voice_file)
-go = st.button(C["cta"], type="primary" if ready else "secondary",
-               disabled=not ready, use_container_width=True)
-if not ready:
-    missing = C["need_source"] if not story_file else C["need_voice"]
-    st.html(f'<p class="cs-need">{missing}</p>')
+go = False
+if not locked:
+    st.html(
+        '<div class="cs-commit">'
+        f'<span class="cs-step" data-done="{1 if story_file else 0}">'
+        f'{"✓" if story_file else "○"} {C["src_label"]}</span>'
+        '<span class="cs-commit-arrow">→</span>'
+        f'<span class="cs-step" data-done="{1 if voice_file else 0}">'
+        f'{"✓" if voice_file else "○"} {C["v_label"]}</span>'
+        '</div>'
+    )
+    go = st.button(C["cta"], type="primary" if ready else "secondary",
+                   disabled=not ready, use_container_width=True)
+    if not ready:
+        missing = C["need_source"] if not story_file else C["need_voice"]
+        st.html(f'<p class="cs-need">{missing}</p>')
+    else:
+        gen_lang_name = "中文" if LANG == "ZH" else "English"
+        lock_caption = (f"点击后设置将锁定 — 故事将以<strong>{gen_lang_name}</strong>朗读。主题仍可切换。" if LANG == "ZH"
+                        else f"Settings lock once you press this — the story will be narrated in <strong>{gen_lang_name}</strong>. Theme stays changeable.")
+        st.html(f'<p class="cs-need">{lock_caption}</p>')
 
 # ---------------------------------------------------------------------------
 # GENERATE (backend untouched — only the loading presentation is themed)
@@ -1768,6 +1906,7 @@ if go:
         pass
 
     st.session_state.story = story
+    st.session_state.story_lang = LANG
     st.session_state.used_fallback = story is MOCK_STORY_PAGES
     st.session_state.idx = 0
     st.session_state.dir = "fwd"
@@ -1817,6 +1956,14 @@ if not st.session_state.story:
     st.html(f'<div class="cs-empty"><h3>{C["empty_h"]}</h3><p>{C["empty_p"]}</p>'
             f'<div class="cs-steps">{chips}</div></div>')
     st.stop()
+
+if st.session_state.story_lang and st.session_state.story_lang != LANG:
+    other_name = "中文" if st.session_state.story_lang == "ZH" else "English"
+    mismatch_caption = (
+        f"界面已切换为中文。本故事以{other_name}朗读 — 重新开始即可换成其他语言。" if LANG == "ZH"
+        else f"Interface switched to English. This story was narrated in {other_name} — start over to hear it in another language."
+    )
+    st.html(f'<p class="cs-need">{mismatch_caption}</p>')
 
 # ---------------------------------------------------------------------------
 # FLATTEN (schema untouched)
@@ -1906,7 +2053,8 @@ with st.expander("Sentence follow-along (optional)", expanded=False):
         if isinstance(clip, (bytes, bytearray)):
             _st_play_wav(bytes(clip), label="This sentence", download_name="sentence.wav", key=f"sent_{i}")
         else:
-            st.audio(clip)
+            with st.container(border=True):
+                st.audio(clip)
     n1, n2, n3 = st.columns(3)
     with n1:
         if st.button(C["prev"], disabled=i == 0, use_container_width=True, key="sent_prev"):
@@ -1990,7 +2138,11 @@ st.caption(
     "**Check level** = meter only. **Record/Stop**, then click **Add to Companion** below. "
     "Prefer External Mic; in Brave use Download if the player is silent."
 )
-ask_payload = record_voice(key="companion_ask_mic")
+ask_payload = record_voice(
+    key="companion_ask_mic",
+    bg=T["surface"], ink=T["ink"], border=T["card_border"],
+    field_bg=T["btn_bg"], cta=T["cta_bg"], cta_ink=T["cta_ink"],
+)
 if isinstance(ask_payload, dict) and ask_payload.get("data_b64"):
     # Prefer take_id — WebM files share identical base64 *prefixes*, so [:96] collided
     sig = (
