@@ -177,6 +177,15 @@ EMOTION_DSP_DEFAULTS = {
 # long sentences are synthesized in internal chunks then stitched into one clip.
 _SENT_END = re.compile(r"(?<=[.!?。！？])(?:\s+|(?=[A-Z\"“‘]))")
 
+_EMOTION_TAG = re.compile(r"\s*\[[a-z_]+\]\s*")
+
+
+def _strip_emotion_tags(text: str) -> str:
+    """Director annotations like [excited]/[whispers] are for the TTS layer
+    only and must never reach the page — they still show up raw in the
+    Theatre-script JSON expander, which is where they belong."""
+    return _EMOTION_TAG.sub(" ", text or "").strip()
+
 
 def tag_emotion(sentence_text: str) -> str:
     lowered = sentence_text.lower()
@@ -817,6 +826,40 @@ FORMAL_EN = {
     "fallback_img": "Picture-to-story isn't wired up yet — showing the built-in sample story instead.",
     "need_source": "Add a storybook or picture to begin.",
     "need_voice": "Pick, upload, or record a voice to begin.",
+    "download": "Download", "download_preview": "Download preview WAV",
+    "atmos_line": "{atmos}: {n_chapters} chapter(s) · {total} sentences · {beats} beat(s) in order",
+    "full_story_heading": "Play entire story so far",
+    "full_story_caption": "Optional: one player for all narrated story audio. The feed below is the chronological log.",
+    "full_story_label": "Full story audio",
+    "full_story_not_ready": "Full-story audio isn't ready yet (missing sentence clips).",
+    "follow_along_expander": "Sentence follow-along (optional)",
+    "follow_along_hint": "Jump to a single sentence if you want — not required for listening.",
+    "this_sentence_label": "This sentence",
+    "companion_heading": "Story & Companion — in order",
+    "companion_caption": ("Top → bottom is time order: original story, then each question, answer, "
+                          "or Continue beat as it happened. New actions always append below."),
+    "chapter_fallback": "Chapter", "play_chapter_label": "Play · {title}",
+    "your_question_label": "Your question", "narrator_reply_label": "Narrator reply",
+    "add_next_heading": "Add next",
+    "add_next_caption": ("TTS **{backend}** · {n} sentences so far. Continue or ask — "
+                         "each result appends at the bottom of the feed above."),
+    "continue_story_btn": "Continue story",
+    "ask_voice_heading": "Ask with your voice",
+    "ask_voice_caption": ("Check level = meter only. Record/Stop, then click Add to Companion below. "
+                         "Prefer External Mic; in Brave use Download if the player is silent."),
+    "add_to_companion_btn": "Add to Companion",
+    "recording_ready_label": "Recording ready · level {pct}%",
+    "recording_silent_warn": ("Recording looks silent. Try External Mic, Check level until the bar "
+                              "moves, Record again."),
+    "heard_label": "Heard: “{q}”",
+    "preview_download_expander": "Preview / download your take",
+    "your_recording_label": "Your recording · level {pct}%",
+    "type_question_heading": "Or type a question",
+    "question_placeholder": "Ask something about the story…",
+    "ask_btn": "Ask", "theatre_json_expander": "Theatre script JSON",
+    "voice_already_captured": "Voice already captured for this story. Re-generate to record a new sample.",
+    "old_recorder_hint": ("Streamlit's old recorder often used a different (silent) device. Use this "
+                          "panel: Listen until the bar moves, then Record/Stop on the same mic."),
 }
 PLAYFUL_EN = {
     "title": "Story Time!",
@@ -845,6 +888,40 @@ PLAYFUL_EN = {
     "fallback_img": "I can't read pictures yet — here's a story to try instead!",
     "need_source": "Add a picture or book to begin!",
     "need_voice": "Pick, upload, or record a voice!",
+    "download": "Download", "download_preview": "Download preview WAV",
+    "atmos_line": "{atmos}: {n_chapters} chapter(s) · {total} sentences · {beats} beat(s) in order",
+    "full_story_heading": "Play entire story so far",
+    "full_story_caption": "Optional: one player for all narrated story audio. The feed below is the chronological log.",
+    "full_story_label": "Full story audio",
+    "full_story_not_ready": "Full-story audio isn't ready yet (missing sentence clips).",
+    "follow_along_expander": "Sentence follow-along (optional)",
+    "follow_along_hint": "Jump to a single sentence if you want — not required for listening.",
+    "this_sentence_label": "This sentence",
+    "companion_heading": "Story & Companion — in order",
+    "companion_caption": ("Top → bottom is time order: original story, then each question, answer, "
+                          "or Continue beat as it happened. New actions always append below."),
+    "chapter_fallback": "Chapter", "play_chapter_label": "Play · {title}",
+    "your_question_label": "Your question", "narrator_reply_label": "Narrator reply",
+    "add_next_heading": "Add next",
+    "add_next_caption": ("TTS **{backend}** · {n} sentences so far. Continue or ask — "
+                         "each result appends at the bottom of the feed above."),
+    "continue_story_btn": "Continue story",
+    "ask_voice_heading": "Ask with your voice",
+    "ask_voice_caption": ("Check level = meter only. Record/Stop, then click Add to Companion below. "
+                         "Prefer External Mic; in Brave use Download if the player is silent."),
+    "add_to_companion_btn": "Add to Companion",
+    "recording_ready_label": "Recording ready · level {pct}%",
+    "recording_silent_warn": ("Recording looks silent. Try External Mic, Check level until the bar "
+                              "moves, Record again."),
+    "heard_label": "Heard: “{q}”",
+    "preview_download_expander": "Preview / download your take",
+    "your_recording_label": "Your recording · level {pct}%",
+    "type_question_heading": "Or type a question",
+    "question_placeholder": "Ask something about the story…",
+    "ask_btn": "Ask", "theatre_json_expander": "Theatre script JSON",
+    "voice_already_captured": "Voice already captured for this story. Re-generate to record a new sample.",
+    "old_recorder_hint": ("Streamlit's old recorder often used a different (silent) device. Use this "
+                          "panel: Listen until the bar moves, then Record/Stop on the same mic."),
 }
 
 FORMAL_ZH = {
@@ -873,6 +950,35 @@ FORMAL_ZH = {
     "fallback_img": "图片转故事功能尚未接入——改为显示内置的示例故事。",
     "need_source": "请先添加一本故事书或图片。",
     "need_voice": "请选择、上传或录制一把声音。",
+    "download": "下载", "download_preview": "下载预览录音",
+    "atmos_line": "{atmos}：{n_chapters} 章 · {total} 句 · {beats} 个片段（按顺序）",
+    "full_story_heading": "播放目前的完整故事",
+    "full_story_caption": "可选：用一个播放器播放所有已朗读的故事音频。下方是按时间顺序的记录。",
+    "full_story_label": "完整故事音频",
+    "full_story_not_ready": "完整故事音频还没准备好（缺少句子片段）。",
+    "follow_along_expander": "逐句跟读（可选）",
+    "follow_along_hint": "如果需要，可以跳到某一句——收听时并非必须。",
+    "this_sentence_label": "这一句",
+    "companion_heading": "故事与问答 —— 按顺序",
+    "companion_caption": "从上到下按时间顺序：先是原始故事，接着是每个提问、回答或续写片段。新内容会一直加在最下方。",
+    "chapter_fallback": "章节", "play_chapter_label": "播放 · {title}",
+    "your_question_label": "你的提问", "narrator_reply_label": "旁白回覆",
+    "add_next_heading": "继续添加",
+    "add_next_caption": "TTS **{backend}** · 目前共 {n} 句。继续故事或提问——结果会加在上方记录的最下面。",
+    "continue_story_btn": "继续故事",
+    "ask_voice_heading": "用你的声音提问",
+    "ask_voice_caption": "试听音量只是音量表。录音/停止后，点击下方的加入问答。建议使用外接麦克风；在 Brave 浏览器中若播放器无声，请改用下载。",
+    "add_to_companion_btn": "加入问答",
+    "recording_ready_label": "录音已就绪 · 音量 {pct}%",
+    "recording_silent_warn": "录音似乎是静音的。请尝试外接麦克风，试听音量直到指示条移动，再重新录音。",
+    "heard_label": "听到：「{q}」",
+    "preview_download_expander": "预览/下载你的录音",
+    "your_recording_label": "你的录音 · 音量 {pct}%",
+    "type_question_heading": "或输入文字提问",
+    "question_placeholder": "问一些关于故事的问题……",
+    "ask_btn": "提问", "theatre_json_expander": "剧本脚本 JSON",
+    "voice_already_captured": "本故事已经录好声音了。要录新的，请重新生成。",
+    "old_recorder_hint": "Streamlit 内建的录音器常常用到别的（无声）设备。请用这个面板：先试听直到指示条移动，再用同一个麦克风录音/停止。",
 }
 
 PLAYFUL_ZH = {
@@ -901,6 +1007,35 @@ PLAYFUL_ZH = {
     "fallback_img": "我还不会读图片——先给你讲个别的故事！",
     "need_source": "先加一张图片或一本书吧！",
     "need_voice": "先选、上传或录一把声音吧！",
+    "download": "下载", "download_preview": "下载预览录音",
+    "atmos_line": "{atmos}：{n_chapters} 章 · {total} 句 · {beats} 个片段（按顺序）",
+    "full_story_heading": "播放目前的完整故事",
+    "full_story_caption": "可选：用一个播放器播放所有已朗读的故事音频。下方是按时间顺序的记录。",
+    "full_story_label": "完整故事音频",
+    "full_story_not_ready": "完整故事音频还没准备好（缺少句子片段）。",
+    "follow_along_expander": "逐句跟读（可选）",
+    "follow_along_hint": "如果需要，可以跳到某一句——收听时并非必须。",
+    "this_sentence_label": "这一句",
+    "companion_heading": "故事与问答 —— 按顺序",
+    "companion_caption": "从上到下按时间顺序：先是原始故事，接着是每个提问、回答或续写片段。新内容会一直加在最下方。",
+    "chapter_fallback": "章节", "play_chapter_label": "播放 · {title}",
+    "your_question_label": "你的提问", "narrator_reply_label": "旁白回覆",
+    "add_next_heading": "继续添加",
+    "add_next_caption": "TTS **{backend}** · 目前共 {n} 句。继续故事或提问——结果会加在上方记录的最下面。",
+    "continue_story_btn": "继续故事",
+    "ask_voice_heading": "用你的声音提问",
+    "ask_voice_caption": "试听音量只是音量表。录音/停止后，点击下方的加入问答。建议使用外接麦克风；在 Brave 浏览器中若播放器无声，请改用下载。",
+    "add_to_companion_btn": "加入问答",
+    "recording_ready_label": "录音已就绪 · 音量 {pct}%",
+    "recording_silent_warn": "录音似乎是静音的。请尝试外接麦克风，试听音量直到指示条移动，再重新录音。",
+    "heard_label": "听到：「{q}」",
+    "preview_download_expander": "预览/下载你的录音",
+    "your_recording_label": "你的录音 · 音量 {pct}%",
+    "type_question_heading": "或输入文字提问",
+    "question_placeholder": "问一些关于故事的问题……",
+    "ask_btn": "提问", "theatre_json_expander": "剧本脚本 JSON",
+    "voice_already_captured": "本故事已经录好声音了。要录新的，请重新生成。",
+    "old_recorder_hint": "Streamlit 内建的录音器常常用到别的（无声）设备。请用这个面板：先试听直到指示条移动，再用同一个麦克风录音/停止。",
 }
 
 FORMAL = {"EN": FORMAL_EN, "ZH": FORMAL_ZH}
@@ -992,6 +1127,7 @@ THEMES = {
         "audio_wrap_radius": "0 0 18px 18px",
         "audio_filter": "invert(92%) hue-rotate(180deg) contrast(.92) saturate(.6)",
         "disabled_ink": "#9A9384",
+        "success_bg": "unset", "success_ink": "unset",
         "wave_h": "26px", "wave_radius": "2px", "wave_op": ".55",
         "progress": "bars", "prog_h": "3px", "prog_radius": "2px", "prog_gap": "4px",
         "prog_track": "rgba(246,241,232,.10)",
@@ -1059,6 +1195,7 @@ THEMES = {
         "audio_wrap_radius": "0 0 24px 8px",
         "audio_filter": "none",
         "disabled_ink": "#5A5148",
+        "success_bg": "#E6F4E9", "success_ink": "#1E5B32",
         "wave_h": "30px", "wave_radius": "3px", "wave_op": ".85",
         "progress": "bars", "prog_h": "9px", "prog_radius": "5px", "prog_gap": "5px",
         "prog_track": "rgba(42,37,32,.12)",
@@ -1115,7 +1252,7 @@ THEMES = {
         "badge_font": "'Baloo 2', cursive", "badge_w": "800",
         "badge_size": "clamp(13px,3vw,15px)", "badge_pad": "8px 16px",
         "badge_border": "3px solid #1B2A4A", "badge_ls": "0", "badge_tt": "none",
-        "badge_rot": "-10deg", "badge_glyph": "20px",
+        "badge_rot": "-1.5deg", "badge_glyph": "20px",
         "face_size": "60px", "face_font": "30px", "face_op": "1",
         "face_border": "3px solid #1B2A4A", "face_shadow": "0 4px 0 #1B2A4A",
         "face_gap": "76px",
@@ -1124,6 +1261,7 @@ THEMES = {
         "audio_wrap_radius": "0 0 15px 15px",
         "audio_filter": "none",
         "disabled_ink": "#3D4A63",
+        "success_bg": "#E6F4E9", "success_ink": "#1E5B32",
         "wave_h": "26px", "wave_radius": "2px", "wave_op": ".9",
         "progress": "dots", "prog_h": "14px", "prog_radius": "999px",
         "prog_gap": "7px", "prog_track": "#FFFFFF",
@@ -1189,6 +1327,7 @@ THEMES = {
         "audio_wrap_radius": "0 0 24px 10px",
         "audio_filter": "none",
         "disabled_ink": "#5C5175",
+        "success_bg": "#E6F4E9", "success_ink": "#1E5B32",
         "wave_h": "22px", "wave_radius": "3px", "wave_op": ".8",
         "progress": "track", "prog_h": "8px", "prog_radius": "5px",
         "prog_gap": "0", "prog_track": "#FFFFFF",
@@ -1277,6 +1416,30 @@ h1, h2, h3, h4, [data-testid="stHeading"] h1, [data-testid="stHeading"] h2,
   background:{T['surface']}; border:{T['card_border']} !important;
   border-radius:{T['up_radius']}; padding:calc(var(--step)*1.5) calc(var(--step)*2);
   margin-bottom:calc(var(--step)*3); }}
+
+/* Expanders (locked-settings summary, sentence follow-along, theatre JSON):
+   Streamlit's own summary-label color falls through to a near-white default
+   in light themes — same missing-ink bug as headings. The collapsed summary
+   also has no border/background of its own without this, which is why
+   Crayon's locked-settings row read as "a lone floating emoji". */
+[data-testid="stExpander"]{{
+  background:{T['surface']}; border:{T['card_border']} !important;
+  border-radius:{T['card_radius']}; margin-bottom:calc(var(--step)*2); }}
+[data-testid="stExpander"] summary, [data-testid="stExpander"] summary *{{
+  color:{T['ink']} !important; -webkit-text-fill-color:{T['ink']} !important; }}
+
+/* "Recording ready" success banner: Streamlit's default success green reads
+   as pale-on-pale (~2:1) in the light themes; Classic's is already fine
+   (kept via the "unset" token so this rule is a no-op there). */
+[data-testid="stAlertContentSuccess"]{{ background:{T['success_bg']} !important; }}
+[data-testid="stAlertContentSuccess"] p{{ color:{T['success_ink']} !important; }}
+
+/* Ask text input renders as a near-black slab by default in light themes —
+   the last unthemed dark object on the page. */
+[data-testid="stTextInput"] input{{
+  background:{T['surface']} !important; color:{T['ink']} !important;
+  border:{T['card_border']} !important; }}
+[data-testid="stTextInput"] input::placeholder{{ color:var(--muted) !important; opacity:1; }}
 
 /* Manual eyebrow label — matches the auto-generated segmented_control label
    style, for spots (like the Setup card's "2 · WHO READS IT?" column) that
@@ -1428,7 +1591,7 @@ h1, h2, h3, h4, [data-testid="stHeading"] h1, [data-testid="stHeading"] h2,
   font-size:{T['badge_size']}; letter-spacing:{T['badge_ls']};
   text-transform:{T['badge_tt']}; padding:{T['badge_pad']}; border-radius:999px;
   border:{T['badge_border']}; transform:rotate({T['badge_rot']});
-  margin-bottom:calc(var(--step)*1.5);
+  margin-bottom:calc(var(--step)*2);
   transition:background .8s ease, color .8s ease, border-color .8s ease; }}
 .cs-badge span{{ font-size:{T['badge_glyph']}; line-height:1; display:inline-block; }}
 @keyframes cs-bob{{ 0%,100%{{transform:translateY(0)}} 50%{{transform:translateY(-4px)}} }}
@@ -1717,7 +1880,7 @@ with c2:
             )
         if st.session_state.own_voice_method == "Record":
             if st.session_state.story:
-                st.caption("Voice already captured for this story. Re-generate to record a new sample.")
+                st.caption(C["voice_already_captured"])
                 if st.session_state.get("recorded_voice_wav"):
                     voice_file = _BytesVoice(
                         st.session_state["recorded_voice_wav"], "recording.wav"
@@ -1726,14 +1889,12 @@ with c2:
                     voice_file = None
             else:
                 st.caption(C["rec_hint"])
-                st.caption(
-                    "Streamlit’s old recorder often used a different (silent) device. "
-                    "Use this panel: Listen until the bar moves, then Record/Stop on the **same** mic."
-                )
+                st.caption(C["old_recorder_hint"])
                 payload = record_voice(
                     key="storyteller_mic",
                     bg=T["surface"], ink=T["ink"], border=T["card_border"],
                     field_bg=T["btn_bg"], cta=T["cta_bg"], cta_ink=T["cta_ink"],
+                    lang=LANG.lower(),
                 )
                 voice_file = None
                 if payload and payload.get("data_b64"):
@@ -1792,18 +1953,19 @@ with c2:
             st.warning(C["v_missing"])
 
 if locked:
-    if st.button(
-        "🔄 " + ("修改设置并重新开始" if LANG == "ZH" else "Change settings & start over"),
-        use_container_width=True,
-    ):
-        for k in ("story", "story_lang", "full_story_audio", "story_chapters", "dir", "autoplay",
-                  "used_fallback", "illustration", "narrator_voice_bytes",
-                  "companion_session", "ambience_by_emotion", "theatre_script",
-                  "recorded_voice_wav", "pending_question_wav", "last_question_wav",
-                  "last_ask_sig"):
-            st.session_state[k] = None
-        st.session_state.idx = 0
-        st.rerun()
+    with setup_card:
+        if st.button(
+            "🔄 " + ("修改设置并重新开始" if LANG == "ZH" else "Change settings & start over"),
+            use_container_width=True,
+        ):
+            for k in ("story", "story_lang", "full_story_audio", "story_chapters", "dir", "autoplay",
+                      "used_fallback", "illustration", "narrator_voice_bytes",
+                      "companion_session", "ambience_by_emotion", "theatre_script",
+                      "recorded_voice_wav", "pending_question_wav", "last_question_wav",
+                      "last_ask_sig"):
+                st.session_state[k] = None
+            st.session_state.idx = 0
+            st.rerun()
 
 ready = bool(story_file and voice_file)
 go = False
@@ -2008,24 +2170,24 @@ n_chapters = sum(1 for ev in timeline if ev.get("kind") == "chapter")
 st.html(
     f'<div class="cs-badge" style="background:{e["chip"]};color:{e["chip_ink"]}">'
     f'<span style="animation:{e["wig"]}">{e["face"]}</span>'
-    f'{C["atmos"]}: {n_chapters} chapter(s) · {total} sentences · '
-    f'{len(timeline)} beat(s) in order</div>'
+    f'{C["atmos_line"].format(atmos=C["atmos"], n_chapters=n_chapters, total=total, beats=len(timeline))}'
+    f'</div>'
 )
 
-st.subheader("Play entire story so far")
-st.caption("Optional: one player for all narrated story audio. The feed below is the chronological log.")
+st.subheader(C["full_story_heading"])
+st.caption(C["full_story_caption"])
 if full_wav:
     _st_play_wav(
         full_wav,
-        label="Full story audio",
+        label=C["full_story_label"],
         download_name="storyteller_full_story.wav",
         key="full_story",
     )
 else:
-    st.warning("Full-story audio isn’t ready yet (missing sentence clips).")
+    st.warning(C["full_story_not_ready"])
 
-with st.expander("Sentence follow-along (optional)", expanded=False):
-    st.caption("Jump to a single sentence if you want — not required for listening.")
+with st.expander(C["follow_along_expander"], expanded=False):
+    st.caption(C["follow_along_hint"])
     bars = "".join(
         f'<i style="background:{e["line"]};animation-delay:{(n % 9) * .11:.2f}s;'
         f'height:{30 + (n * 41) % 70}%"></i>' for n in range(26)
@@ -2041,7 +2203,7 @@ with st.expander("Sentence follow-along (optional)", expanded=False):
           <span>Page {page_no}</span>
           <span class="cs-dot" style="background:{e['line']}"></span>
           <span>{i + 1}/{total}</span></div>
-        <p class="cs-text"><span class="cs-face-spacer"></span>{sent.get("text", "")}</p>
+        <p class="cs-text"><span class="cs-face-spacer"></span>{_strip_emotion_tags(sent.get("text", ""))}</p>
         <div class="cs-speaker" style="opacity:.8">
           <i style="background:{e['line']}"></i>{sent.get("speaker", "narrator")}</div>
         <div class="cs-wave">{bars}</div>
@@ -2051,7 +2213,7 @@ with st.expander("Sentence follow-along (optional)", expanded=False):
     if sent.get("audio_path"):
         clip = sent["audio_path"]
         if isinstance(clip, (bytes, bytearray)):
-            _st_play_wav(bytes(clip), label="This sentence", download_name="sentence.wav", key=f"sent_{i}")
+            _st_play_wav(bytes(clip), label=C["this_sentence_label"], download_name="sentence.wav", key=f"sent_{i}")
         else:
             with st.container(border=True):
                 st.audio(clip)
@@ -2071,46 +2233,44 @@ with st.expander("Sentence follow-along (optional)", expanded=False):
 st.session_state.autoplay = False
 
 st.html('<hr class="cs-rule">')
-st.subheader("Story & Companion — in order")
-st.caption(
-    "Top → bottom is time order: original story, then each question, answer, "
-    "or Continue beat as it happened. New actions always append below."
-)
+st.subheader(C["companion_heading"])
+st.caption(C["companion_caption"])
 
 for ti, ev in enumerate(timeline):
     kind = ev.get("kind")
     audio = ev.get("audio")
     if kind == "chapter":
         face = e["face"]
+        title = ev.get("title") or C["chapter_fallback"]
         st.html(
             f'<div class="cs-badge" style="background:{e["chip"]};color:{e["chip_ink"]};margin-top:12px">'
-            f'<span style="animation:{e["wig"]}">{face}</span>{ev.get("title", f"Chapter")}</div>'
+            f'<span style="animation:{e["wig"]}">{face}</span>{title}</div>'
         )
-        st.markdown(ev.get("text") or "")
+        st.markdown(_strip_emotion_tags(ev.get("text") or ""))
         if isinstance(audio, (bytes, bytearray)) and audio:
             _st_play_wav(
                 bytes(audio),
-                label=f"Play · {ev.get('title', 'Chapter')}",
+                label=C["play_chapter_label"].format(title=title),
                 download_name=f"timeline_{ti}.wav",
                 key=f"tl_{ti}",
             )
     elif kind == "user":
         with st.chat_message("user"):
-            st.markdown(ev.get("text") or "")
+            st.markdown(_strip_emotion_tags(ev.get("text") or ""))
             if isinstance(audio, (bytes, bytearray)) and audio:
                 _st_play_wav(
                     bytes(audio),
-                    label="Your question",
+                    label=C["your_question_label"],
                     download_name=f"q_{ti}.wav",
                     key=f"tl_{ti}",
                 )
     else:
         with st.chat_message("assistant"):
-            st.markdown(ev.get("text") or "")
+            st.markdown(_strip_emotion_tags(ev.get("text") or ""))
             if isinstance(audio, (bytes, bytearray)) and audio:
                 _st_play_wav(
                     bytes(audio),
-                    label="Narrator reply",
+                    label=C["narrator_reply_label"],
                     download_name=f"a_{ti}.wav",
                     key=f"tl_{ti}",
                 )
@@ -2120,28 +2280,23 @@ for ti, ev in enumerate(timeline):
 # ---------------------------------------------------------------------------
 st.html('<hr class="cs-rule">')
 heard_index = (total - 1) if st.session_state.full_story_audio else i
-st.subheader("Add next")
-st.caption(
-    f"TTS **{TTS_BACKEND}** · {total} sentences so far. "
-    "Continue or ask — each result appends at the bottom of the feed above."
-)
+st.subheader(C["add_next_heading"])
+st.caption(C["add_next_caption"].format(backend=TTS_BACKEND, n=total))
 
-if st.button("Continue story", type="primary", use_container_width=True, key="continue_story_btn"):
+if st.button(C["continue_story_btn"], type="primary", use_container_width=True, key="continue_story_btn"):
     try:
         _continue_story_beat(heard_index=heard_index)
         st.rerun()
     except Exception as exc:
         st.error(f"Continue story failed: {type(exc).__name__}: {exc}")
 
-st.markdown("##### Ask with your voice")
-st.caption(
-    "**Check level** = meter only. **Record/Stop**, then click **Add to Companion** below. "
-    "Prefer External Mic; in Brave use Download if the player is silent."
-)
+st.markdown(f"##### {C['ask_voice_heading']}")
+st.caption(C["ask_voice_caption"])
 ask_payload = record_voice(
     key="companion_ask_mic",
     bg=T["surface"], ink=T["ink"], border=T["card_border"],
     field_bg=T["btn_bg"], cta=T["cta_bg"], cta_ink=T["cta_ink"],
+    lang=LANG.lower(),
 )
 if isinstance(ask_payload, dict) and ask_payload.get("data_b64"):
     # Prefer take_id — WebM files share identical base64 *prefixes*, so [:96] collided
@@ -2166,15 +2321,13 @@ pending = st.session_state.get("pending_question_wav")
 preview = st.session_state.get("last_question_wav")
 if pending:
     peak = float(st.session_state.get("pending_question_peak") or 0)
-    st.success(f"Recording ready · level {int(peak * 100)}%")
+    st.success(C["recording_ready_label"].format(pct=int(peak * 100)))
     # Button first — heavy players used to push it below the fold / fail before render
     if peak < 0.02:
-        st.error(
-            "Recording looks silent. Try External Mic, Check level until the bar moves, Record again."
-        )
+        st.error(C["recording_silent_warn"])
     else:
         if st.button(
-            "Add to Companion",
+            C["add_to_companion_btn"],
             type="primary",
             use_container_width=True,
             key="send_q",
@@ -2185,7 +2338,7 @@ if pending:
                 question = transcribe_wav_bytes(
                     client, raw, language=STORY_LANGUAGE[LANG]
                 )
-                st.info(f"Heard: “{question}”")
+                st.info(C["heard_label"].format(q=question))
                 _handle_companion_question(
                     question, heard_index=heard_index, question_audio=raw
                 )
@@ -2195,30 +2348,30 @@ if pending:
                 st.rerun()
             except Exception as exc:
                 st.error(f"Voice question failed: {type(exc).__name__}: {exc}")
-    with st.expander("Preview / download your take", expanded=True):
+    with st.expander(C["preview_download_expander"], expanded=True):
         _st_play_wav(
             preview or pending,
-            label=f"Your recording · level {int(peak * 100)}%",
+            label=C["your_recording_label"].format(pct=int(peak * 100)),
             download_name="my_question.mp3",
             key="q_persistent",
         )
 
-st.markdown("##### Or type a question")
+st.markdown(f"##### {C['type_question_heading']}")
 typed_cols = st.columns([4, 1])
 with typed_cols[0]:
     typed_q = st.text_input(
         "Question",
         value="",
-        placeholder="Ask something about the story…",
+        placeholder=C["question_placeholder"],
         label_visibility="collapsed",
         key="typed_question_input",
     )
 with typed_cols[1]:
-    send_typed = st.button("Ask", use_container_width=True, key="typed_ask_btn")
+    send_typed = st.button(C["ask_btn"], use_container_width=True, key="typed_ask_btn")
 if send_typed and (typed_q or "").strip():
     _handle_companion_question(typed_q.strip(), heard_index=heard_index)
     st.rerun()
 
 if st.session_state.theatre_script:
-    with st.expander("Theatre script JSON"):
+    with st.expander(C["theatre_json_expander"]):
         st.json(st.session_state.theatre_script)

@@ -24,12 +24,14 @@ def record_voice(
     field_bg: str | None = None,
     cta: str | None = None,
     cta_ink: str | None = None,
+    lang: str | None = None,
 ) -> dict[str, Any] | None:
     """Render mic check + recorder. Returns ``{"mime", "data_b64", "peak"}`` or None.
 
     The optional color args theme the panel to match the active app theme
     (see mic_component/frontend/index.html's applyTheme()) instead of the
-    hardcoded dark look it had before.
+    hardcoded dark look it had before. ``lang`` ("en"/"zh") switches the
+    panel's own copy (title, button labels, status hints).
     """
     return _recorder(
         key=key,
@@ -40,6 +42,7 @@ def record_voice(
         fieldBg=field_bg,
         cta=cta,
         ctaInk=cta_ink,
+        lang=lang,
     )
 
 

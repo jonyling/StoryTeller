@@ -54,7 +54,7 @@
 </head>
 <body>
   <div class="box">
-    <div><b>Mic check + record</b> — same device for both (fixes silent Streamlit recorder).</div>
+    <div id="titleLine"><b>Mic check + record</b> — same device for both (fixes silent Streamlit recorder).</div>
     <div class="row">
       <select id="devices"></select>
       <button id="listenBtn" type="button">Check level</button>
@@ -112,6 +112,52 @@
     const previewWrap = document.getElementById("previewWrap");
     const previewAudio = document.getElementById("previewAudio");
     const pushBtn = document.getElementById("pushBtn");
+    const titleLine = document.getElementById("titleLine");
+    const previewHint = document.getElementById("previewHint");
+
+    const I18N = {
+      en: {
+        title: "<b>Mic check + record</b> — same device for both (fixes silent Streamlit recorder).",
+        checkLevel: "Check level", stopCheck: "Stop check",
+        record: "Record", stop: "Stop",
+        statusDefault: "With headphones: pick External Mic / Realtek. Check level (bar must move), then Record.",
+        recommended: "  ✓ recommended",
+        deviceCount: (n, hidden) => n + " mic(s)" + (hidden ? " · hid " + hidden + " Steam/virtual" : "") +
+          ". Prefer External Mic. Check level = meter only (not playback). Record/Stop, then use the player below.",
+        levelCheckOn: "Level check on… speak. Then Record/Stop (same mic). Playback is the player below — not this button.",
+        micChanged: "Mic changed. Click Check level to verify the bar moves, then Record.",
+        nothingToPush: "Nothing to push — Record first.",
+        previewHint: 'Preview above. Below the mic box, click <b>Add to Companion</b>. If missing, tap Push again.',
+        pushBtn: "Push to app",
+      },
+      zh: {
+        title: "<b>试听音量＋录音</b> —— 两者使用同一个设备（避免 Streamlit 内建录音器无声）。",
+        checkLevel: "试听音量", stopCheck: "停止试听",
+        record: "录音", stop: "停止",
+        statusDefault: "使用耳机时：请选外接麦克风 / Realtek。先试听音量（指示条要移动），再录音。",
+        recommended: "  ✓ 推荐",
+        deviceCount: (n, hidden) => n + " 个麦克风" + (hidden ? "（隐藏了 " + hidden + " 个 Steam/虚拟设备）" : "") +
+          "。建议使用外接麦克风。试听音量只是音量表（不会播放）。录音/停止后，用下方播放器收听。",
+        levelCheckOn: "试听中……请说话。然后录音/停止（同一个麦克风）。播放请用下方播放器——不是这个按钮。",
+        micChanged: "麦克风已更改。点击试听音量确认指示条移动，再录音。",
+        nothingToPush: "还没有可推送的内容——请先录音。",
+        previewHint: '上方为预览。在录音框下方点击<b>加入问答</b>。若没看到，请再次点击推送。',
+        pushBtn: "推送到应用",
+      },
+    };
+    let lang = "en";
+    function t(key, ...args) {
+      const entry = I18N[lang][key];
+      return typeof entry === "function" ? entry(...args) : entry;
+    }
+    function applyLang() {
+      titleLine.innerHTML = t("title");
+      previewHint.innerHTML = t("previewHint");
+      pushBtn.textContent = t("pushBtn");
+      status.textContent = t("statusDefault");
+      listenBtn.textContent = t("checkLevel");
+      recBtn.textContent = t("record");
+    }
 
     let monitorStream = null;
     let monitorCtx = null;
@@ -128,7 +174,11 @@
     function setStatus(msg) { status.textContent = msg; }
 
     function bumpHeight() {
-      Streamlit.setFrameHeight(Math.max(document.body.scrollHeight, 220));
+      // No artificial floor — a fixed 220px minimum left ~120px of dead
+      // space below the panel whenever there was no preview/recording yet
+      // to fill it. scrollHeight already reflects the real content height
+      // (hidden elements are display:none, so they don't inflate it).
+      Streamlit.setFrameHeight(document.body.scrollHeight);
     }
 
     function showLocalPreview(blob, payload) {
@@ -291,18 +341,13 @@
         const opt = document.createElement("option");
         opt.value = item.d.deviceId;
         opt.textContent = item.preferred
-          ? item.label + "  ✓ recommended"
+          ? item.label + t("recommended")
           : item.label;
         devicesEl.appendChild(opt);
       });
       devicesEl.selectedIndex = 0;
 
-      setStatus(
-        ranked.length +
-          " mic(s)" +
-          (hidden ? " · hid " + hidden + " Steam/virtual" : "") +
-          ". Prefer External Mic. Check level = meter only (not playback). Record/Stop, then use the player below."
-      );
+      setStatus(t("deviceCount", ranked.length, hidden));
     }
 
     async function stopMonitor() {
@@ -316,7 +361,7 @@
       monitorCtx = null;
       fill.style.width = "0%";
       pct.textContent = "0%";
-      listenBtn.textContent = "Check level";
+      listenBtn.textContent = t("checkLevel");
     }
 
     async function startMonitor() {
@@ -333,8 +378,8 @@
       analyser.fftSize = 2048;
       src.connect(analyser);
       const data = new Uint8Array(analyser.fftSize);
-      listenBtn.textContent = "Stop check";
-      setStatus("Level check on… speak. Then Record/Stop (same mic). Playback is the player below — not this button.");
+      listenBtn.textContent = t("stopCheck");
+      setStatus(t("levelCheckOn"));
 
       const tick = () => {
         analyser.getByteTimeDomainData(data);
@@ -413,7 +458,7 @@
         }
         if (recStream) recStream.getTracks().forEach((t) => t.stop());
         recStream = null;
-        recBtn.textContent = "Record";
+        recBtn.textContent = t("record");
         recBtn.classList.remove("danger");
         recBtn.classList.add("primary");
 
@@ -462,7 +507,7 @@
       timerIv = setInterval(() => {
         timerEl.textContent = fmt(Date.now() - recStartedAt);
       }, 250);
-      recBtn.textContent = "Stop";
+      recBtn.textContent = t("stop");
       recBtn.classList.remove("primary");
       recBtn.classList.add("danger");
       setStatus("Recording on the selected mic… speak clearly, then Stop (≥6s).");
@@ -475,14 +520,14 @@
     recBtn.addEventListener("click", startRecord);
     pushBtn.addEventListener("click", () => {
       if (!lastPayload) {
-        setStatus("Nothing to push — Record first.");
+        setStatus(t("nothingToPush"));
         return;
       }
       pushPayload(lastPayload);
     });
     devicesEl.addEventListener("change", () => {
       stopMonitor();
-      setStatus("Mic changed. Click Check level to verify the bar moves, then Record.");
+      setStatus(t("micChanged"));
     });
 
     function applyTheme(args) {
@@ -494,6 +539,11 @@
       };
       for (const [argKey, cssVar] of Object.entries(map)) {
         if (args[argKey]) root.setProperty(cssVar, args[argKey]);
+      }
+      const nextLang = args.lang === "zh" ? "zh" : "en";
+      if (nextLang !== lang) {
+        lang = nextLang;
+        applyLang();
       }
     }
 
