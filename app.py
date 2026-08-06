@@ -13,6 +13,7 @@ import os
 import re
 import struct
 import tempfile
+import threading
 from pathlib import Path
 import time
 
@@ -72,7 +73,12 @@ for k, v in {"theme": "Classic", "lang": "EN", "sfx": False, "story": None,
              "last_question_wav": None,
              "pending_question_wav": None,
              "pending_question_peak": 0.0,
-             "last_ask_sig": None}.items():
+             "last_ask_sig": None,
+             "wait_kind": None,
+             "wait_typed_q": None,
+             "wait_error": None,
+             "clear_typed_question": False,
+             "flash_new_entry": False}.items():
     st.session_state.setdefault(k, v)
 
 # Real generation config. Story language reuses the EN/ZH picker.
@@ -517,27 +523,61 @@ def _ensure_companion_session(heard_index: int):
     return session
 
 
-def _speak_companion_answer(answer: str) -> bytes | None:
-    voice_bytes = st.session_state.get("narrator_voice_bytes")
+def _speak_companion_answer_core(answer, voice_bytes, voice_cloner, narration_synthesizer):
+    """Pure — no st.* calls, safe to run on a background thread via _run_staged."""
     if not voice_bytes or not answer:
         return None
+    raw = speak_reply(
+        answer,
+        voice_bytes=voice_bytes,
+        language=STORY_LANGUAGE[LANG],
+        voice_cloner=voice_cloner,
+        narration_synthesizer=narration_synthesizer,
+    )
+    return _for_browser_playback(raw) if raw and raw[:4] == b"RIFF" else raw
+
+
+def _speak_companion_answer(answer: str) -> bytes | None:
+    voice_bytes = st.session_state.get("narrator_voice_bytes")
     try:
         voice_cloner, narration_synthesizer = _build_tts_backends()
-        raw = speak_reply(
-            answer,
-            voice_bytes=voice_bytes,
-            language=STORY_LANGUAGE[LANG],
-            voice_cloner=voice_cloner,
-            narration_synthesizer=narration_synthesizer,
-        )
-        return _for_browser_playback(raw) if raw and raw[:4] == b"RIFF" else raw
+        return _speak_companion_answer_core(answer, voice_bytes, voice_cloner, narration_synthesizer)
     except Exception as exc:
         st.warning(f"Could not speak Companion reply: {exc}")
         return None
 
 
+def _fmt_elapsed(seconds: float) -> str:
+    s = int(seconds)
+    return f"{s // 60}:{s % 60:02d}"
+
+
+def _run_staged(status_box, label: str, fn, *args, **kwargs):
+    """Run fn off the main thread while status_box's label ticks an elapsed
+    clock, so a 30s-2min blocking call (LLM / TTS) never looks frozen."""
+    outcome = {}
+    start = time.time()
+
+    def _target():
+        try:
+            outcome["value"] = fn(*args, **kwargs)
+        except Exception as exc:
+            outcome["error"] = exc
+
+    thread = threading.Thread(target=_target, daemon=True)
+    thread.start()
+    while thread.is_alive():
+        elapsed = _fmt_elapsed(time.time() - start)
+        status_box.update(label=f"{label}  ·  {C['wait_elapsed_fmt'].format(time=elapsed)}", state="running")
+        thread.join(timeout=0.5)
+    if "error" in outcome:
+        raise outcome["error"]
+    return outcome.get("value")
+
+
 def _handle_companion_question(
-    question: str, *, heard_index: int, question_audio: bytes | None = None
+    question: str, *, heard_index: int, question_audio: bytes | None = None,
+    status_box=None,
 ) -> None:
     q = (question or "").strip()
     if not q:
@@ -554,13 +594,33 @@ def _handle_companion_question(
 
     try:
         client, model = _openai_compatible_client()
-        answer = ask_companion(session, q, CompanionReasoner(client, model=model))
+        if status_box is not None:
+            status_box.update(label=C["wait_stage_think"], state="running")
+            answer = _run_staged(
+                status_box, C["wait_stage_think"],
+                ask_companion, session, q, CompanionReasoner(client, model=model),
+            )
+        else:
+            answer = ask_companion(session, q, CompanionReasoner(client, model=model))
     except Exception as exc:
         answer = (
             f"(Companion unavailable: {exc}) Try again once an OpenAI/xAI key is set. "
             "You can still keep listening to the story."
         )
-    audio = _speak_companion_answer(answer)
+    if status_box is not None:
+        status_box.update(label=C["wait_stage_voice"], state="running")
+        voice_bytes = st.session_state.get("narrator_voice_bytes")
+        try:
+            voice_cloner, narration_synthesizer = _build_tts_backends()
+            audio = _run_staged(
+                status_box, C["wait_stage_voice"],
+                _speak_companion_answer_core, answer, voice_bytes, voice_cloner, narration_synthesizer,
+            )
+        except Exception as exc:
+            st.warning(f"Could not speak Companion reply: {exc}")
+            audio = None
+    else:
+        audio = _speak_companion_answer(answer)
     asst_turn = {"role": "assistant", "text": answer, "audio": audio}
     st.session_state.companion_chat.append(asst_turn)
     _append_timeline({"kind": "assistant", "text": answer, "audio": audio})
@@ -596,18 +656,18 @@ def _continue_story_beat(*, heard_index: int) -> None:
         st.error("No narrator voice in session — Generate a story first with a voice selected.")
         return
     client, model = _openai_compatible_client()
-    with st.status("Continuing the story…", expanded=True) as status:
-        status.update(label="Writing the next beat…", state="running")
-        sentences = generate_next_beat(
-            client,
-            st.session_state.story,
+    with st.status(C["continue_stage_write"], expanded=True) as status:
+        st.caption(C["continue_reassure"])
+        sentences = _run_staged(
+            status, C["continue_stage_write"],
+            generate_next_beat, client, st.session_state.story,
             language=STORY_LANGUAGE[LANG],
             model=model if STORY_PROVIDER != "grok" else "grok-2-latest",
         )
-        status.update(label="Narrating with your voice…", state="running")
         voice_cloner, narration_synthesizer = _build_tts_backends()
-        sentence_dicts = narrate_sentences(
-            sentences,
+        sentence_dicts = _run_staged(
+            status, C["continue_stage_narrate"],
+            narrate_sentences, sentences,
             voice_bytes=voice_bytes,
             language=STORY_LANGUAGE[LANG],
             voice_cloner=voice_cloner,
@@ -654,7 +714,8 @@ def _continue_story_beat(*, heard_index: int) -> None:
         st.session_state.story_chapters = chapters
         _ensure_story_timeline()
         _append_timeline(_timeline_chapter(ch))
-        status.update(label="Next beat ready — added below in order", state="complete")
+        status.update(label=C["continue_stage_done"], state="complete")
+    st.session_state.flash_new_entry = True
 
 
 def generate_mock_story(pages, voice_file, *, raw_source_bytes, language, enable_sfx,
@@ -860,6 +921,18 @@ FORMAL_EN = {
     "voice_already_captured": "Voice already captured for this story. Re-generate to record a new sample.",
     "old_recorder_hint": ("Streamlit's old recorder often used a different (silent) device. Use this "
                           "panel: Listen until the bar moves, then Record/Stop on the same mic."),
+    "wait_stage_listen": "Listening to your question…",
+    "wait_stage_think": "Thinking about it…",
+    "wait_stage_voice": "Voicing the reply…",
+    "wait_reassure_voice": "Voicing takes about a minute on this machine — the page will update on its own.",
+    "wait_reassure_type": "This can take under a minute — the page will update on its own.",
+    "wait_ready": "Ready — added below in order",
+    "wait_failed": "That didn't work. Try asking again.",
+    "wait_elapsed_fmt": "{time} elapsed",
+    "continue_stage_write": "Writing the next beat…",
+    "continue_stage_narrate": "Narrating with your voice…",
+    "continue_stage_done": "Next beat ready — added below in order",
+    "continue_reassure": "Writing and narrating can take a minute or two — the page will update on its own.",
 }
 PLAYFUL_EN = {
     "title": "Story Time!",
@@ -922,6 +995,18 @@ PLAYFUL_EN = {
     "voice_already_captured": "Voice already captured for this story. Re-generate to record a new sample.",
     "old_recorder_hint": ("Streamlit's old recorder often used a different (silent) device. Use this "
                           "panel: Listen until the bar moves, then Record/Stop on the same mic."),
+    "wait_stage_listen": "Listening in…",
+    "wait_stage_think": "Having a think…",
+    "wait_stage_voice": "Finding my voice…",
+    "wait_reassure_voice": "Finding my voice can take about a minute — hang tight, the page updates on its own.",
+    "wait_reassure_type": "This can take under a minute — hang tight, the page updates on its own.",
+    "wait_ready": "All done — added below!",
+    "wait_failed": "Oops, that didn't work. Try asking again!",
+    "wait_elapsed_fmt": "{time} elapsed",
+    "continue_stage_write": "Dreaming up what happens next…",
+    "continue_stage_narrate": "Narrating with your voice…",
+    "continue_stage_done": "Next bit's ready — added below!",
+    "continue_reassure": "This can take a minute or two — hang tight, the page updates on its own.",
 }
 
 FORMAL_ZH = {
@@ -979,6 +1064,18 @@ FORMAL_ZH = {
     "ask_btn": "提问", "theatre_json_expander": "剧本脚本 JSON",
     "voice_already_captured": "本故事已经录好声音了。要录新的，请重新生成。",
     "old_recorder_hint": "Streamlit 内建的录音器常常用到别的（无声）设备。请用这个面板：先试听直到指示条移动，再用同一个麦克风录音/停止。",
+    "wait_stage_listen": "正在听你的问题……",
+    "wait_stage_think": "正在思考……",
+    "wait_stage_voice": "正在配音……",
+    "wait_reassure_voice": "配音大约需要一分钟，页面会自动更新。",
+    "wait_reassure_type": "这可能需要不到一分钟，页面会自动更新。",
+    "wait_ready": "已完成——已加在下方",
+    "wait_failed": "没有成功，请再试一次。",
+    "wait_elapsed_fmt": "已用 {time}",
+    "continue_stage_write": "正在续写下一段……",
+    "continue_stage_narrate": "正在用你的声音朗读……",
+    "continue_stage_done": "下一段已就绪——已加在下方",
+    "continue_reassure": "续写和朗读可能需要一两分钟，页面会自动更新。",
 }
 
 PLAYFUL_ZH = {
@@ -1036,6 +1133,18 @@ PLAYFUL_ZH = {
     "ask_btn": "提问", "theatre_json_expander": "剧本脚本 JSON",
     "voice_already_captured": "本故事已经录好声音了。要录新的，请重新生成。",
     "old_recorder_hint": "Streamlit 内建的录音器常常用到别的（无声）设备。请用这个面板：先试听直到指示条移动，再用同一个麦克风录音/停止。",
+    "wait_stage_listen": "听你说……",
+    "wait_stage_think": "让我想想……",
+    "wait_stage_voice": "正在找声音……",
+    "wait_reassure_voice": "找声音大约需要一分钟，别急，页面会自动更新。",
+    "wait_reassure_type": "这可能需要不到一分钟，别急，页面会自动更新。",
+    "wait_ready": "好啦——已经加在下面！",
+    "wait_failed": "呀，没有成功。再问一次看看！",
+    "wait_elapsed_fmt": "已用 {time}",
+    "continue_stage_write": "正在想接下来会发生什么……",
+    "continue_stage_narrate": "正在用你的声音朗读……",
+    "continue_stage_done": "下一段好啦——加在下面啦！",
+    "continue_reassure": "这可能需要一两分钟，别急，页面会自动更新。",
 }
 
 FORMAL = {"EN": FORMAL_EN, "ZH": FORMAL_ZH}
@@ -1584,6 +1693,24 @@ button[data-variant="segmented_control"][aria-checked="true"] *{{
   border:none !important; border-left:3px solid {T['accent']} !important;
   border-radius:{T['card_radius']}; }}
 [data-testid="stStatusWidget"] *{{ color:{T['ink']} !important; }}
+/* Elapsed clock in the label ticks every 0.5s (_run_staged) — tabular-nums
+   keeps the digits from jittering the layout as they change. */
+[data-testid="stStatusWidget"] p{{ font-variant-numeric:tabular-nums; }}
+
+/* A text_input disabled while a wait is running (Ask box) needs the same
+   full-opacity, dashed-border treatment as .cs-disabled — plain :disabled
+   opacity would make it look broken rather than temporarily locked. */
+.stTextInput input:disabled{{ opacity:1 !important;
+  color:{T['disabled_ink']} !important; -webkit-text-fill-color:{T['disabled_ink']} !important;
+  background:{T['bg']} !important; border:1px dashed {T['hairline']} !important; }}
+
+/* One-shot highlight on the feed entry that just arrived after a long
+   silent wait, so its appearance is obvious rather than a silent pop-in. */
+@keyframes cs-flash-in{{
+  0%{{ background:color-mix(in oklch,{T['accent']} 30%,transparent); }}
+  100%{{ background:transparent; }}
+}}
+.st-key-tl_flash{{ animation:cs-flash-in 1.2s ease-out; border-radius:{T['card_radius']}; }}
 
 /* Streamlit dims any disabled widget (uploaders, selects, segmented
    controls, camera input) to ~40% opacity by default, which read as
@@ -2296,7 +2423,7 @@ st.html('<hr class="cs-rule">')
 st.subheader(C["companion_heading"])
 st.caption(C["companion_caption"])
 
-for ti, ev in enumerate(timeline):
+def _render_timeline_entry(ti, ev):
     kind = ev.get("kind")
     audio = ev.get("audio")
     if kind == "chapter":
@@ -2336,6 +2463,17 @@ for ti, ev in enumerate(timeline):
                     key=f"tl_{ti}",
                 )
 
+
+flash_ti = len(timeline) - 1 if st.session_state.get("flash_new_entry") else -1
+for ti, ev in enumerate(timeline):
+    if ti == flash_ti:
+        with st.container(key="tl_flash"):
+            _render_timeline_entry(ti, ev)
+    else:
+        _render_timeline_entry(ti, ev)
+if flash_ti >= 0:
+    st.session_state.flash_new_entry = False
+
 # ---------------------------------------------------------------------------
 # CONTROLS — always at the bottom so the feed stays chronological
 # ---------------------------------------------------------------------------
@@ -2344,12 +2482,31 @@ heard_index = (total - 1) if st.session_state.full_story_audio else i
 st.subheader(C["add_next_heading"])
 st.caption(C["add_next_caption"].format(backend=TTS_BACKEND, n=total))
 
-if st.button(C["continue_story_btn"], type="primary", use_container_width=True, key="continue_story_btn"):
+wait_busy = bool(st.session_state.get("wait_kind"))
+
+wait_error = st.session_state.get("wait_error")
+if wait_error:
+    st.error(wait_error["summary"])
+    with st.expander("Details", expanded=False):
+        st.code(wait_error["detail"])
+
+if st.button(C["continue_story_btn"], type="primary", use_container_width=True,
+             key="continue_story_btn", disabled=wait_busy):
+    st.session_state.wait_error = None
+    st.session_state.wait_kind = "continue"
+    st.rerun()
+
+if st.session_state.get("wait_kind") == "continue":
     try:
         _continue_story_beat(heard_index=heard_index)
-        st.rerun()
     except Exception as exc:
-        st.error(f"Continue story failed: {type(exc).__name__}: {exc}")
+        st.session_state.wait_error = {
+            "summary": f"Continue story failed: {type(exc).__name__}: {exc}",
+            "detail": f"{type(exc).__name__}: {exc}",
+        }
+    finally:
+        st.session_state.wait_kind = None
+    st.rerun()
 
 st.markdown(f"##### {C['ask_voice_heading']}")
 st.caption(C["ask_voice_caption"])
@@ -2392,23 +2549,11 @@ if pending:
             type="primary",
             use_container_width=True,
             key="send_q",
+            disabled=wait_busy,
         ):
-            raw = pending
-            try:
-                client, _ = _openai_compatible_client()
-                question = transcribe_wav_bytes(
-                    client, raw, language=STORY_LANGUAGE[LANG]
-                )
-                st.info(C["heard_label"].format(q=question))
-                _handle_companion_question(
-                    question, heard_index=heard_index, question_audio=raw
-                )
-                st.session_state.pending_question_wav = None
-                st.session_state.last_question_wav = None
-                st.session_state.last_ask_sig = None
-                st.rerun()
-            except Exception as exc:
-                st.error(f"Voice question failed: {type(exc).__name__}: {exc}")
+            st.session_state.wait_error = None
+            st.session_state.wait_kind = "voice_q"
+            st.rerun()
     with st.expander(C["preview_download_expander"], expanded=True):
         _st_play_wav(
             preview or pending,
@@ -2417,7 +2562,43 @@ if pending:
             key="q_persistent",
         )
 
+if st.session_state.get("wait_kind") == "voice_q":
+    raw = st.session_state.get("pending_question_wav")
+    box = st.status(C["wait_stage_listen"], expanded=True)
+    st.caption(C["wait_reassure_voice"])
+    try:
+        client, _ = _openai_compatible_client()
+        question = _run_staged(
+            box, C["wait_stage_listen"],
+            transcribe_wav_bytes, client, raw, language=STORY_LANGUAGE[LANG],
+        )
+        if not (question or "").strip():
+            raise ValueError("Recording didn't transcribe to any text — try recording again.")
+        st.info(C["heard_label"].format(q=question))
+        _handle_companion_question(
+            question, heard_index=heard_index, question_audio=raw, status_box=box
+        )
+        box.update(label=C["wait_ready"], state="complete")
+        st.session_state.pending_question_wav = None
+        st.session_state.last_question_wav = None
+        st.session_state.last_ask_sig = None
+        st.session_state.flash_new_entry = True
+    except Exception as exc:
+        box.update(label=C["wait_failed"], state="error")
+        st.session_state.wait_error = {
+            "summary": C["wait_failed"],
+            "detail": f"{type(exc).__name__}: {exc}",
+        }
+    finally:
+        st.session_state.wait_kind = None
+    st.rerun()
+
 st.markdown(f"##### {C['type_question_heading']}")
+# Deferred clear: writing session_state[key] for a widget AFTER that widget
+# has rendered in the same run raises StreamlitAPIException — so the actual
+# clear happens here, before the text_input below is instantiated.
+if st.session_state.pop("clear_typed_question", False):
+    st.session_state.typed_question_input = ""
 typed_cols = st.columns([4, 1])
 with typed_cols[0]:
     typed_q = st.text_input(
@@ -2426,11 +2607,36 @@ with typed_cols[0]:
         placeholder=C["question_placeholder"],
         label_visibility="collapsed",
         key="typed_question_input",
+        disabled=wait_busy,
     )
 with typed_cols[1]:
-    send_typed = st.button(C["ask_btn"], use_container_width=True, key="typed_ask_btn")
+    send_typed = st.button(C["ask_btn"], use_container_width=True, key="typed_ask_btn",
+                            disabled=wait_busy)
 if send_typed and (typed_q or "").strip():
-    _handle_companion_question(typed_q.strip(), heard_index=heard_index)
+    st.session_state.wait_error = None
+    st.session_state.wait_kind = "typed_q"
+    st.session_state.wait_typed_q = typed_q.strip()
+    st.rerun()
+
+if st.session_state.get("wait_kind") == "typed_q":
+    box = st.status(C["wait_stage_think"], expanded=True)
+    st.caption(C["wait_reassure_type"])
+    try:
+        _handle_companion_question(
+            st.session_state.get("wait_typed_q") or "", heard_index=heard_index, status_box=box
+        )
+        box.update(label=C["wait_ready"], state="complete")
+        st.session_state.flash_new_entry = True
+        st.session_state.clear_typed_question = True
+    except Exception as exc:
+        box.update(label=C["wait_failed"], state="error")
+        st.session_state.wait_error = {
+            "summary": C["wait_failed"],
+            "detail": f"{type(exc).__name__}: {exc}",
+        }
+    finally:
+        st.session_state.wait_kind = None
+        st.session_state.wait_typed_q = None
     st.rerun()
 
 if st.session_state.theatre_script:
