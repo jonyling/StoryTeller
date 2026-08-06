@@ -1091,7 +1091,9 @@ THEMES = {
         "f_mono": "'IBM Plex Mono', ui-monospace, monospace",
         "app_bg": "radial-gradient(1100px 600px at 50% -10%,#16181F 0%,#0D0F13 60%)",
         "ink": "#F6F1E8", "ink_muted": "#CFC4B4", "ink_faint": "#9A9186",
-        "hair": "rgba(246,241,232,.10)", "surface": "rgba(246,241,232,.04)",
+        "hair": "rgba(246,241,232,.10)", "surface": "#1E2028",
+        "bg": "#12141A", "muted": "#B9B2A5", "hairline": "#33363F",
+        "accent": "#E0C48A", "on_accent": "#12141A",
         "grain": "rgba(246,241,232,.022)",
         "title_w": "600", "title_max": "46px", "kick_size": "11px",
         "kick_ls": ".16em", "kick_tt": "uppercase", "kick_w": "400",
@@ -1160,7 +1162,9 @@ THEMES = {
         "f_mono": "'Nunito', system-ui, sans-serif",
         "app_bg": "#FFF9EE",
         "ink": "#2A2520", "ink_muted": "#5C5449", "ink_faint": "#8A7A60",
-        "hair": "rgba(42,37,32,.14)", "surface": "#FFFBF0",
+        "hair": "rgba(42,37,32,.14)", "surface": "#FFFDF7",
+        "bg": "#FFF9EE", "muted": "#6B6155", "hairline": "#E2D8C8",
+        "accent": "#F4845F", "on_accent": "#2A2520",
         "grain": "rgba(42,37,32,.05)",
         "title_w": "800", "title_max": "52px", "kick_size": "13px",
         "kick_ls": ".06em", "kick_tt": "uppercase", "kick_w": "800",
@@ -1226,7 +1230,9 @@ THEMES = {
         "f_mono": "'Nunito', system-ui, sans-serif",
         "app_bg": "#EAF1FF",
         "ink": "#1B2A4A", "ink_muted": "#3C4E75", "ink_faint": "#5C77A8",
-        "hair": "rgba(27,42,74,.16)", "surface": "#F2F6FF",
+        "hair": "rgba(27,42,74,.16)", "surface": "#FFFFFF",
+        "bg": "#EAF1FF", "muted": "#4A5B7D", "hairline": "#B9CBEC",
+        "accent": "#FFD166", "on_accent": "#1B2A4A",
         "grain": "rgba(27,42,74,.04)",
         "title_w": "800", "title_max": "52px", "kick_size": "13px",
         "kick_ls": ".08em", "kick_tt": "uppercase", "kick_w": "800",
@@ -1292,7 +1298,9 @@ THEMES = {
         "f_mono": "'Quicksand', system-ui, sans-serif",
         "app_bg": "#F4F1FA",
         "ink": "#332A4A", "ink_muted": "#5F5280", "ink_faint": "#9A8CB8",
-        "hair": "rgba(122,104,160,.22)", "surface": "#FFFDF9",
+        "hair": "rgba(122,104,160,.22)", "surface": "#FFFFFF",
+        "bg": "#F4F1FA", "muted": "#5C5175", "hairline": "#D6CFE6",
+        "accent": "#7A6CA0", "on_accent": "#FFFFFF",
         "grain": "rgba(74,62,104,.035)",
         "title_w": "700", "title_max": "48px", "kick_size": "12px",
         "kick_ls": ".14em", "kick_tt": "uppercase", "kick_w": "700",
@@ -1425,8 +1433,16 @@ h1, h2, h3, h4, [data-testid="stHeading"] h1, [data-testid="stHeading"] h2,
 [data-testid="stExpander"]{{
   background:{T['surface']}; border:{T['card_border']} !important;
   border-radius:{T['card_radius']}; margin-bottom:calc(var(--step)*2); }}
-[data-testid="stExpander"] summary, [data-testid="stExpander"] summary *{{
-  color:{T['ink']} !important; -webkit-text-fill-color:{T['ink']} !important; }}
+/* The summary element itself carries its own dark background from
+   Streamlit's defaults — styling only the parent container (above) left
+   it a solid near-black bar with near-black text in every non-Classic
+   theme. */
+[data-testid="stExpander"] summary{{
+  background:{T['surface']} !important; color:{T['ink']} !important;
+  border:1px solid {T['hairline']}; border-radius:{T['card_radius']}; }}
+[data-testid="stExpander"] summary *, [data-testid="stExpander"] summary svg{{
+  color:{T['ink']} !important; -webkit-text-fill-color:{T['ink']} !important;
+  fill:{T['ink']} !important; }}
 
 /* "Recording ready" success banner: Streamlit's default success green reads
    as pale-on-pale (~2:1) in the light themes; Classic's is already fine
@@ -1453,22 +1469,30 @@ h1, h2, h3, h4, [data-testid="stHeading"] h1, [data-testid="stHeading"] h2,
 .st-key-setup_card [data-testid="stHorizontalBlock"] > [data-testid="stColumn"]:first-child{{
   border-right:1px solid var(--hair); padding-right:calc(var(--step)*3); }}
 
-/* Segmented control — Streamlit renders options as
-   stBaseButton-segmented_control (unselected) / -segmented_controlActive
-   (selected), grouped in a stButtonGroup. Style both states from theme
-   tokens so the selected option never shows Streamlit's default red. */
+/* Segmented control — individual options carry NO data-testid at all in
+   this Streamlit version (verified live: they're plain
+   button[data-variant="segmented_control"][role="radio"], selected marked
+   by aria-checked="true"/data-selected="true"). The stBaseButton-segmented_control
+   / -segmented_controlActive testids this file assumed for a long time
+   never matched anything, so every "selected" pill on screen all session
+   was Streamlit's own unstyled default — never actually themed. */
 [data-testid="stButtonGroup"]{{ flex-wrap:wrap; gap:6px; }}
 [data-testid="stButtonGroup"] [data-testid="stWidgetLabel"] p{{
   font-family:{T['f_mono']}; font-size:11px; letter-spacing:.1em;
   text-transform:uppercase; color:var(--muted) !important; }}
-[data-testid^="stBaseButton-segmented_control"]{{
+/* Unselected = surface + full ink text; selected = filled accent + on_accent
+   text. Selected should read as the strongest item, not the faintest. */
+button[data-variant="segmented_control"]{{
   font-family:{T['f_display']}; font-weight:{T['btn_w']}; font-size:14px;
   min-height:40px; border-radius:{T['btn_radius']};
-  background:{T['btn_bg']} !important; color:{T['btn_ink']} !important;
-  border:{T['btn_border']} !important; transition:background .2s ease; }}
-[data-testid="stBaseButton-segmented_controlActive"]{{
-  background:{T['cta_bg']} !important; color:{T['cta_ink']} !important;
-  border:{T['cta_border']} !important; font-weight:800; }}
+  background:{T['surface']} !important; color:{T['ink']} !important;
+  border:1px solid {T['hairline']} !important; transition:background .2s ease; }}
+button[data-variant="segmented_control"] *{{ color:{T['ink']} !important; }}
+button[data-variant="segmented_control"][aria-checked="true"]{{
+  background:{T['accent']} !important;
+  border:1px solid {T['accent']} !important; font-weight:800; }}
+button[data-variant="segmented_control"][aria-checked="true"] *{{
+  color:{T['on_accent']} !important; }}
 [data-testid="stRadio"] label p{{
   font-family:{T['f_display']}; font-weight:{T['btn_w']}; font-size:14px;
   color:var(--ink) !important; }}
@@ -1541,7 +1565,35 @@ h1, h2, h3, h4, [data-testid="stHeading"] h1, [data-testid="stHeading"] h2,
 .stButton > button:disabled span, .stButton > button:disabled div{{
   color:{T['disabled_ink']} !important; -webkit-text-fill-color:{T['disabled_ink']} !important; }}
 .stButton > button[kind="primary"]{{ background:{T['cta_bg']}; color:{T['cta_ink']};
-  border:{T['cta_border']}; font-weight:800; box-shadow:{T['btn_shadow']}; }}
+  border:{T['cta_border']}; font-weight:800 !important; box-shadow:{T['btn_shadow']}; }}
+.stButton > button[kind="primary"] p{{ font-weight:800 !important; }}
+
+/* st.status() (e.g. "Narrating with your voice…") renders as an unstyled
+   white bar with no theme presence. */
+[data-testid="stStatusWidget"]{{ background:{T['surface']} !important;
+  border:none !important; border-left:3px solid {T['accent']} !important;
+  border-radius:{T['card_radius']}; }}
+[data-testid="stStatusWidget"] *{{ color:{T['ink']} !important; }}
+
+/* Streamlit dims any disabled widget (uploaders, selects, segmented
+   controls, camera input) to ~40% opacity by default, which read as
+   unreadable ghosting against these theme surfaces once locked — giving no
+   way to tell disabled from broken. Full opacity, muted (still ≥4.5:1) ink
+   instead. Utility class for any future disabled section that wants the
+   same treatment plus a visible reason line, in ink not muted. */
+.cs-disabled, .cs-disabled *{{ opacity:1 !important; color:{T['muted']} !important; }}
+.cs-disabled input, .cs-disabled button{{ background:{T['bg']} !important;
+  border:1px dashed {T['hairline']} !important; cursor:not-allowed; }}
+.cs-disabled-reason{{ color:{T['ink']} !important; font-weight:600;
+  padding:calc(var(--step)*1) calc(var(--step)*1.5); border-left:3px solid {T['accent']};
+  background:{T['surface']}; margin-bottom:calc(var(--step)*1.5); }}
+[data-testid="stVerticalBlockBorderWrapper"] :disabled,
+[data-testid="stVerticalBlockBorderWrapper"] [aria-disabled="true"]{{
+  opacity:1 !important; }}
+[data-testid="stVerticalBlockBorderWrapper"] :disabled *,
+[data-testid="stVerticalBlockBorderWrapper"] [aria-disabled="true"] *{{
+  opacity:1 !important; color:{T['muted']} !important;
+  -webkit-text-fill-color:{T['muted']} !important; }}
 .cs-need{{ text-align:center; font-size:13px; color:var(--muted) !important;
   margin:calc(var(--step)*1) 0 0; }}
 
@@ -1680,9 +1732,10 @@ h1, h2, h3, h4, [data-testid="stHeading"] h1, [data-testid="stHeading"] h2,
    no visible play triangle/scrubber/volume in the light themes. Border and
    background live on the wrapper container below instead. */
 audio[data-testid="stAudio"]{{ display:block !important;
-  width:100% !important; height:44px !important; border-radius:12px !important; }}
+  width:100% !important; height:44px !important; border-radius:12px !important;
+  background:{T['surface']} !important; }}
 audio[data-testid="stAudio"]::-webkit-media-controls-panel{{
-  background-color:{T['audio_wrap_bg']} !important; }}
+  background-color:{T['surface']} !important; }}
 audio[data-testid="stAudio"]::-webkit-media-controls-current-time-display,
 audio[data-testid="stAudio"]::-webkit-media-controls-time-remaining-display{{
   color:{T['ink']} !important; }}
@@ -1798,7 +1851,10 @@ if locked:
         vp = st.session_state.voice_preset
         voice_summary = f'{DEFAULT_VOICES[vp]["face"]} {DEFAULT_VOICES[vp][LANG]}'
     src_face = {"PDF": "📄", "Picture": "🖼", "Camera": "📷"}.get(st.session_state.source, "📄")
-    src_summary = {"PDF": C["src_pdf"], "Picture": C["src_img"], "Camera": C["src_cam"]}[st.session_state.source]
+    src_summary_raw = {"PDF": C["src_pdf"], "Picture": C["src_img"], "Camera": C["src_cam"]}[st.session_state.source]
+    # Playful copy already prefixes its own emoji (e.g. "🖼 Picture") — strip it
+    # so it doesn't duplicate the src_face glyph added below ("🖼 🖼 Picture").
+    src_summary = re.sub(r"^[^\w\s]+\s*", "", src_summary_raw).strip()
     lock_kicker = "设置已锁定" if LANG == "ZH" else "Settings · locked"
     story_lang_name = "中文" if st.session_state.story_lang == "ZH" else "English"
     story_lang_field = f"故事语言：{story_lang_name}" if LANG == "ZH" else f"Story language: {story_lang_name}"
@@ -2168,7 +2224,7 @@ timeline = _ensure_story_timeline()
 n_chapters = sum(1 for ev in timeline if ev.get("kind") == "chapter")
 
 st.html(
-    f'<div class="cs-badge" style="background:{e["chip"]};color:{e["chip_ink"]}">'
+    f'<div class="cs-badge" style="background:color-mix(in oklch,{e["chip"]} 35%,{T["surface"]});color:{T["ink"]}">'
     f'<span style="animation:{e["wig"]}">{e["face"]}</span>'
     f'{C["atmos_line"].format(atmos=C["atmos"], n_chapters=n_chapters, total=total, beats=len(timeline))}'
     f'</div>'
@@ -2243,7 +2299,8 @@ for ti, ev in enumerate(timeline):
         face = e["face"]
         title = ev.get("title") or C["chapter_fallback"]
         st.html(
-            f'<div class="cs-badge" style="background:{e["chip"]};color:{e["chip_ink"]};margin-top:12px">'
+            f'<div class="cs-badge" style="background:color-mix(in oklch,{e["chip"]} 35%,{T["surface"]});'
+            f'color:{T["ink"]};margin-top:12px">'
             f'<span style="animation:{e["wig"]}">{face}</span>{title}</div>'
         )
         st.markdown(_strip_emotion_tags(ev.get("text") or ""))
