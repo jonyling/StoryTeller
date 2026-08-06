@@ -21,12 +21,46 @@ def test_config_error_is_a_pipeline_error():
     assert issubclass(ConfigError, PipelineError)
 
 
-def test_ensure_ffmpeg_on_path_noop_when_already_resolvable(monkeypatch):
+def _glob_by_marker(shared_result=None, static_result=None):
+    """Route glob.glob calls by which search they belong to, based on the
+    pattern's shape: the shared-DLL search ends in an avcodec-*.dll glob,
+    the static-build search ends in a bare bin/ directory glob."""
+
+    def fake_glob(pattern):
+        if "avcodec" in pattern:
+            return shared_result or []
+        return static_result or []
+
+    return fake_glob
+
+
+def test_ensure_ffmpeg_on_path_prepends_shared_dll_dir_even_if_already_resolvable(monkeypatch, tmp_path):
+    # torchcodec needs the shared build's DLLs on PATH regardless of whether
+    # some other (static) ffmpeg.exe is already resolvable — the two needs
+    # are independent, so this search must not be gated on shutil.which.
+    dll_dir = tmp_path / "BtbN.FFmpeg.GPL.Shared.8.1" / "ffmpeg-8.1" / "bin"
+    dll_dir.mkdir(parents=True)
+    dll_path = dll_dir / "avcodec-62.dll"
+    dll_path.write_bytes(b"")
+
     monkeypatch.setattr("pipeline.config.shutil.which", lambda name: "C:\\ffmpeg\\ffmpeg.exe")
-    monkeypatch.setattr("pipeline.config.glob.glob", lambda pattern: (_ for _ in ()).throw(
-        AssertionError("glob should not run when ffmpeg is already resolvable")
-    ))
+    monkeypatch.setattr(
+        "pipeline.config.glob.glob",
+        _glob_by_marker(shared_result=[str(dll_path)]),
+    )
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path))
+    monkeypatch.setenv("PATH", "C:\\existing")
+
+    ensure_ffmpeg_on_path()
+
+    assert os.environ["PATH"] == str(dll_dir) + os.pathsep + "C:\\existing"
+
+
+def test_ensure_ffmpeg_on_path_noop_when_nothing_found_and_already_resolvable(monkeypatch):
+    monkeypatch.setattr("pipeline.config.shutil.which", lambda name: "C:\\ffmpeg\\ffmpeg.exe")
+    monkeypatch.setattr("pipeline.config.glob.glob", _glob_by_marker())
     original_path = "C:\\already\\on\\path"
+    monkeypatch.setenv("LOCALAPPDATA", "C:\\Users\\Someone\\AppData\\Local")
     monkeypatch.setenv("PATH", original_path)
 
     ensure_ffmpeg_on_path()
@@ -34,14 +68,15 @@ def test_ensure_ffmpeg_on_path_noop_when_already_resolvable(monkeypatch):
     assert os.environ["PATH"] == original_path
 
 
-def test_ensure_ffmpeg_on_path_prepends_winget_install_dir(monkeypatch, tmp_path):
+def test_ensure_ffmpeg_on_path_prepends_winget_static_build_dir_when_not_resolvable(monkeypatch, tmp_path):
     bin_dir = tmp_path / "Gyan.FFmpeg_1.0" / "ffmpeg-7.0" / "bin"
     bin_dir.mkdir(parents=True)
     (bin_dir / "ffmpeg.exe").write_bytes(b"")
 
     monkeypatch.setattr("pipeline.config.shutil.which", lambda name: None)
     monkeypatch.setattr(
-        "pipeline.config.glob.glob", lambda pattern: [str(bin_dir)]
+        "pipeline.config.glob.glob",
+        _glob_by_marker(static_result=[str(bin_dir)]),
     )
     monkeypatch.setenv("LOCALAPPDATA", str(tmp_path))
     monkeypatch.setenv("PATH", "C:\\existing")
@@ -53,10 +88,30 @@ def test_ensure_ffmpeg_on_path_prepends_winget_install_dir(monkeypatch, tmp_path
 
 def test_ensure_ffmpeg_on_path_leaves_path_untouched_when_no_candidate_found(monkeypatch):
     monkeypatch.setattr("pipeline.config.shutil.which", lambda name: None)
-    monkeypatch.setattr("pipeline.config.glob.glob", lambda pattern: [])
+    monkeypatch.setattr("pipeline.config.glob.glob", _glob_by_marker())
     monkeypatch.setenv("LOCALAPPDATA", "C:\\Users\\Someone\\AppData\\Local")
     monkeypatch.setenv("PATH", "C:\\existing")
 
     ensure_ffmpeg_on_path()
 
     assert os.environ["PATH"] == "C:\\existing"
+
+
+def test_ensure_ffmpeg_on_path_does_not_duplicate_entry_on_repeated_calls(monkeypatch, tmp_path):
+    dll_dir = tmp_path / "BtbN.FFmpeg.GPL.Shared.8.1" / "ffmpeg-8.1" / "bin"
+    dll_dir.mkdir(parents=True)
+    dll_path = dll_dir / "avcodec-62.dll"
+    dll_path.write_bytes(b"")
+
+    monkeypatch.setattr("pipeline.config.shutil.which", lambda name: "C:\\ffmpeg\\ffmpeg.exe")
+    monkeypatch.setattr(
+        "pipeline.config.glob.glob",
+        _glob_by_marker(shared_result=[str(dll_path)]),
+    )
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path))
+    monkeypatch.setenv("PATH", "C:\\existing")
+
+    ensure_ffmpeg_on_path()
+    ensure_ffmpeg_on_path()
+
+    assert os.environ["PATH"] == str(dll_dir) + os.pathsep + "C:\\existing"

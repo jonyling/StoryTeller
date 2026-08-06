@@ -11,7 +11,14 @@ Turns a short picture-book PDF (or a picture/camera snapshot) and a voice sample
 ## Prerequisites
 
 - Python 3.10+ (3.12 recommended for `coqui-tts`)
-- ffmpeg on PATH
+- ffmpeg on PATH — must be a **shared** build (ships `avcodec-*.dll` etc.), FFmpeg version 4-8.
+  The default winget package (`Gyan.FFmpeg`) is statically linked with no DLLs and, once it
+  reaches v9+, is also newer than `torchcodec` (used internally by `torchaudio`/XTTS) supports —
+  either gap makes XTTS audio loading fail with `Could not load libtorchcodec`, even though plain
+  ffmpeg.exe-based decoding (pydub) works fine. On Windows, install a shared build instead, e.g.
+  `winget install --id BtbN.FFmpeg.GPL.Shared.8.1`. `pipeline/config.py`'s `ensure_ffmpeg_on_path()`
+  auto-discovers both that shared package and `Gyan.FFmpeg`, patching `PATH` at import time so a
+  stale shell/IDE environment doesn't need either already resolvable.
 - GPU recommended for XTTS (CUDA). CPU works but is slow.
 - API keys for story generation (`STORY_PROVIDER`: openai / claude / gemini / grok)
 - **OpenAI API key** also used for Whisper (Companion voice questions) when using openai/grok-compatible routing
