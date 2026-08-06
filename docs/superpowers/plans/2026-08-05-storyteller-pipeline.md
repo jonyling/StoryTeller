@@ -1,3 +1,5 @@
+> **Historical implementation plan.** The shipped app uses **XTTS** (not ElevenLabs-only), per-sentence theatre DSP, Companion mode, bidirectional text-PDF translation, and a custom mic component. See [`CHANGES.md`](../../CHANGES.md) and design spec §11.
+
 # StoryTeller Pipeline Implementation Plan
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
