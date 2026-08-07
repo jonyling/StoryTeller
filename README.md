@@ -56,6 +56,7 @@ Then **Generate**. After narration:
 
 - Scroll the **Story & Companion — in order** feed (chapters, Q&A, continues top → bottom)
 - **Continue story** or **Ask** (voice or text) at the bottom — new beats append below
+- Each of those shows a themed, staged progress status (with a ticking elapsed clock) while it works — these can take 30s-2min on CPU-only XTTS
 
 ### Browser / mic tips
 

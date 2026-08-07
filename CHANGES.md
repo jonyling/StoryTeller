@@ -65,6 +65,18 @@ Vision / picture / camera stories still generate directly in the selected langua
 - Built-in voice assets / generator script: `assets/voices/`, `scripts/generate_builtin_voices.py`.
 - Secrets example updated; real keys stay in ignored `.streamlit/secrets.toml`.
 
+## Waiting-state indicators (2026-08-07)
+
+**Continue story**, **Add to Companion** (voice question), and **Ask** (typed question) previously ran their LLM/Whisper/TTS calls with no visual feedback — on CPU-only XTTS this could look frozen for 30s-2min.
+
+| Change | Where |
+| :--- | :--- |
+| Themed `st.status()` per stage (Listening → Thinking → Voicing), ticking elapsed clock | `app.py` (`_run_staged`) |
+| The 4 controls (Continue / Add to Companion / Ask / question text box) disable, visibly (not just dimmed), while any one wait is running | `app.py` (`wait_kind` session-state flag) |
+| Persistent error banner + collapsible technical detail on failure, instead of a rerun wiping the error | `app.py` (`wait_error`) |
+| New feed entry gets a one-shot accent-colour flash after a long silent wait | `app.py` CSS (`.st-key-tl_flash`) |
+| Stage labels/reassurance copy localized (EN/ZH × formal/playful) | `app.py` copy dicts |
+
 ## Tests & docs
 
 - New/updated: translate, companion, continue/ASR, theatre, orchestrator, story_gen tests.

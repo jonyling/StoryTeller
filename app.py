@@ -13,6 +13,7 @@ import os
 import re
 import struct
 import tempfile
+import threading
 from pathlib import Path
 import time
 
@@ -54,6 +55,7 @@ st.set_page_config(page_title="Context-Aware Storyteller", page_icon="📖",
                    layout="centered", initial_sidebar_state="collapsed")
 
 for k, v in {"theme": "Classic", "lang": "EN", "sfx": False, "story": None,
+             "story_lang": None,
              "used_fallback": False, "source": "PDF", "illustration": None,
              "voice_mode": "Default", "voice_preset": "warm", "own_voice_method": "Upload",
              "idx": 0, "dir": "fwd", "autoplay": False,
@@ -71,7 +73,12 @@ for k, v in {"theme": "Classic", "lang": "EN", "sfx": False, "story": None,
              "last_question_wav": None,
              "pending_question_wav": None,
              "pending_question_peak": 0.0,
-             "last_ask_sig": None}.items():
+             "last_ask_sig": None,
+             "wait_kind": None,
+             "wait_typed_q": None,
+             "wait_error": None,
+             "clear_typed_question": False,
+             "flash_new_entry": False}.items():
     st.session_state.setdefault(k, v)
 
 # Real generation config. Story language reuses the EN/ZH picker.
@@ -82,7 +89,7 @@ if TTS_BACKEND == "elevenlabs":
 else:
     MIN_VOICE_SECONDS = XTTS_MIN_REF_SECONDS
     MAX_VOICE_SECONDS = XTTS_MAX_REF_SECONDS
-SFX_CACHE_DIR = os.path.join(tempfile.gettempdir(), "storyteller_sfx_cache")
+SFX_CACHE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "assets", "sfx_cache")
 STORY_LANGUAGE = {"EN": "English", "ZH": "Mandarin"}
 
 # ---------------------------------------------------------------------------
@@ -175,6 +182,15 @@ EMOTION_DSP_DEFAULTS = {
 # Prefer full sentences on the board. XTTS still has a ~250-char model limit;
 # long sentences are synthesized in internal chunks then stitched into one clip.
 _SENT_END = re.compile(r"(?<=[.!?。！？])(?:\s+|(?=[A-Z\"“‘]))")
+
+_EMOTION_TAG = re.compile(r"\s*\[[a-z_]+\]\s*")
+
+
+def _strip_emotion_tags(text: str) -> str:
+    """Director annotations like [excited]/[whispers] are for the TTS layer
+    only and must never reach the page — they still show up raw in the
+    Theatre-script JSON expander, which is where they belong."""
+    return _EMOTION_TAG.sub(" ", text or "").strip()
 
 
 def tag_emotion(sentence_text: str) -> str:
@@ -346,20 +362,20 @@ def _st_play_wav(
     except Exception:
         mp3_bytes = None
 
-    st.caption(label)
-    if mp3_bytes:
-        st.audio(mp3_bytes, format="audio/mp3")
-    else:
-        st.audio(play, format="audio/wav")
-
-    st.download_button(
-        f"Download · {download_name.replace('.wav', '.mp3' if mp3_bytes else '.wav')}",
-        data=mp3_bytes or play,
-        file_name=download_name.replace(".wav", ".mp3") if mp3_bytes else download_name,
-        mime="audio/mpeg" if mp3_bytes else "audio/wav",
-        use_container_width=True,
-        key=f"dl_{safe_key}_{len(play)}",
-    )
+    with st.container(border=True):
+        st.caption(label)
+        if mp3_bytes:
+            st.audio(mp3_bytes, format="audio/mp3")
+        else:
+            st.audio(play, format="audio/wav")
+        st.download_button(
+            f"{C['download']} · {download_name.replace('.wav', '.mp3' if mp3_bytes else '.wav')}",
+            data=mp3_bytes or play,
+            file_name=download_name.replace(".wav", ".mp3") if mp3_bytes else download_name,
+            mime="audio/mpeg" if mp3_bytes else "audio/wav",
+            use_container_width=True,
+            key=f"dl_{safe_key}_{len(play)}",
+        )
 
 
 def _chapter_from_pages(pages, *, title: str) -> dict:
@@ -440,14 +456,15 @@ def _preview_wav_bytes(wav_bytes: bytes, *, peak: float) -> None:
     preview_dir.mkdir(parents=True, exist_ok=True)
     preview_path = preview_dir / "latest_preview.wav"
     preview_path.write_bytes(play_bytes)
-    st.audio(str(preview_path), format="audio/wav")
-    st.download_button(
-        "Download preview WAV",
-        data=wav_bytes,
-        file_name="voice_preview.wav",
-        mime="audio/wav",
-        use_container_width=True,
-    )
+    with st.container(border=True):
+        st.audio(str(preview_path), format="audio/wav")
+        st.download_button(
+            C["download_preview"],
+            data=wav_bytes,
+            file_name="voice_preview.wav",
+            mime="audio/wav",
+            use_container_width=True,
+        )
 
 
 def _build_story_provider_client():
@@ -506,27 +523,61 @@ def _ensure_companion_session(heard_index: int):
     return session
 
 
-def _speak_companion_answer(answer: str) -> bytes | None:
-    voice_bytes = st.session_state.get("narrator_voice_bytes")
+def _speak_companion_answer_core(answer, voice_bytes, voice_cloner, narration_synthesizer):
+    """Pure — no st.* calls, safe to run on a background thread via _run_staged."""
     if not voice_bytes or not answer:
         return None
+    raw = speak_reply(
+        answer,
+        voice_bytes=voice_bytes,
+        language=STORY_LANGUAGE[LANG],
+        voice_cloner=voice_cloner,
+        narration_synthesizer=narration_synthesizer,
+    )
+    return _for_browser_playback(raw) if raw and raw[:4] == b"RIFF" else raw
+
+
+def _speak_companion_answer(answer: str) -> bytes | None:
+    voice_bytes = st.session_state.get("narrator_voice_bytes")
     try:
         voice_cloner, narration_synthesizer = _build_tts_backends()
-        raw = speak_reply(
-            answer,
-            voice_bytes=voice_bytes,
-            language=STORY_LANGUAGE[LANG],
-            voice_cloner=voice_cloner,
-            narration_synthesizer=narration_synthesizer,
-        )
-        return _for_browser_playback(raw) if raw and raw[:4] == b"RIFF" else raw
+        return _speak_companion_answer_core(answer, voice_bytes, voice_cloner, narration_synthesizer)
     except Exception as exc:
         st.warning(f"Could not speak Companion reply: {exc}")
         return None
 
 
+def _fmt_elapsed(seconds: float) -> str:
+    s = int(seconds)
+    return f"{s // 60}:{s % 60:02d}"
+
+
+def _run_staged(status_box, label: str, fn, *args, **kwargs):
+    """Run fn off the main thread while status_box's label ticks an elapsed
+    clock, so a 30s-2min blocking call (LLM / TTS) never looks frozen."""
+    outcome = {}
+    start = time.time()
+
+    def _target():
+        try:
+            outcome["value"] = fn(*args, **kwargs)
+        except Exception as exc:
+            outcome["error"] = exc
+
+    thread = threading.Thread(target=_target, daemon=True)
+    thread.start()
+    while thread.is_alive():
+        elapsed = _fmt_elapsed(time.time() - start)
+        status_box.update(label=f"{label}  ·  {C['wait_elapsed_fmt'].format(time=elapsed)}", state="running")
+        thread.join(timeout=0.5)
+    if "error" in outcome:
+        raise outcome["error"]
+    return outcome.get("value")
+
+
 def _handle_companion_question(
-    question: str, *, heard_index: int, question_audio: bytes | None = None
+    question: str, *, heard_index: int, question_audio: bytes | None = None,
+    status_box=None,
 ) -> None:
     q = (question or "").strip()
     if not q:
@@ -543,13 +594,33 @@ def _handle_companion_question(
 
     try:
         client, model = _openai_compatible_client()
-        answer = ask_companion(session, q, CompanionReasoner(client, model=model))
+        if status_box is not None:
+            status_box.update(label=C["wait_stage_think"], state="running")
+            answer = _run_staged(
+                status_box, C["wait_stage_think"],
+                ask_companion, session, q, CompanionReasoner(client, model=model),
+            )
+        else:
+            answer = ask_companion(session, q, CompanionReasoner(client, model=model))
     except Exception as exc:
         answer = (
             f"(Companion unavailable: {exc}) Try again once an OpenAI/xAI key is set. "
             "You can still keep listening to the story."
         )
-    audio = _speak_companion_answer(answer)
+    if status_box is not None:
+        status_box.update(label=C["wait_stage_voice"], state="running")
+        voice_bytes = st.session_state.get("narrator_voice_bytes")
+        try:
+            voice_cloner, narration_synthesizer = _build_tts_backends()
+            audio = _run_staged(
+                status_box, C["wait_stage_voice"],
+                _speak_companion_answer_core, answer, voice_bytes, voice_cloner, narration_synthesizer,
+            )
+        except Exception as exc:
+            st.warning(f"Could not speak Companion reply: {exc}")
+            audio = None
+    else:
+        audio = _speak_companion_answer(answer)
     asst_turn = {"role": "assistant", "text": answer, "audio": audio}
     st.session_state.companion_chat.append(asst_turn)
     _append_timeline({"kind": "assistant", "text": answer, "audio": audio})
@@ -585,18 +656,18 @@ def _continue_story_beat(*, heard_index: int) -> None:
         st.error("No narrator voice in session — Generate a story first with a voice selected.")
         return
     client, model = _openai_compatible_client()
-    with st.status("Continuing the story…", expanded=True) as status:
-        status.update(label="Writing the next beat…", state="running")
-        sentences = generate_next_beat(
-            client,
-            st.session_state.story,
+    with st.status(C["continue_stage_write"], expanded=True) as status:
+        st.caption(C["continue_reassure"])
+        sentences = _run_staged(
+            status, C["continue_stage_write"],
+            generate_next_beat, client, st.session_state.story,
             language=STORY_LANGUAGE[LANG],
             model=model if STORY_PROVIDER != "grok" else "grok-2-latest",
         )
-        status.update(label="Narrating with your voice…", state="running")
         voice_cloner, narration_synthesizer = _build_tts_backends()
-        sentence_dicts = narrate_sentences(
-            sentences,
+        sentence_dicts = _run_staged(
+            status, C["continue_stage_narrate"],
+            narrate_sentences, sentences,
             voice_bytes=voice_bytes,
             language=STORY_LANGUAGE[LANG],
             voice_cloner=voice_cloner,
@@ -643,7 +714,8 @@ def _continue_story_beat(*, heard_index: int) -> None:
         st.session_state.story_chapters = chapters
         _ensure_story_timeline()
         _append_timeline(_timeline_chapter(ch))
-        status.update(label="Next beat ready — added below in order", state="complete")
+        status.update(label=C["continue_stage_done"], state="complete")
+    st.session_state.flash_new_entry = True
 
 
 def generate_mock_story(pages, voice_file, *, raw_source_bytes, language, enable_sfx,
@@ -815,6 +887,52 @@ FORMAL_EN = {
     "fallback_img": "Picture-to-story isn't wired up yet — showing the built-in sample story instead.",
     "need_source": "Add a storybook or picture to begin.",
     "need_voice": "Pick, upload, or record a voice to begin.",
+    "download": "Download", "download_preview": "Download preview WAV",
+    "atmos_line": "{atmos}: {n_chapters} chapter(s) · {total} sentences · {beats} beat(s) in order",
+    "full_story_heading": "Play entire story so far",
+    "full_story_caption": "Optional: one player for all narrated story audio. The feed below is the chronological log.",
+    "full_story_label": "Full story audio",
+    "full_story_not_ready": "Full-story audio isn't ready yet (missing sentence clips).",
+    "follow_along_expander": "Sentence follow-along (optional)",
+    "follow_along_hint": "Jump to a single sentence if you want — not required for listening.",
+    "this_sentence_label": "This sentence",
+    "companion_heading": "Story & Companion — in order",
+    "companion_caption": ("Top → bottom is time order: original story, then each question, answer, "
+                          "or Continue beat as it happened. New actions always append below."),
+    "chapter_fallback": "Chapter", "play_chapter_label": "Play · {title}",
+    "your_question_label": "Your question", "narrator_reply_label": "Narrator reply",
+    "add_next_heading": "Add next",
+    "add_next_caption": ("TTS **{backend}** · {n} sentences so far. Continue or ask — "
+                         "each result appends at the bottom of the feed above."),
+    "continue_story_btn": "Continue story",
+    "ask_voice_heading": "Ask with your voice",
+    "ask_voice_caption": ("Check level = meter only. Record/Stop, then click Add to Companion below. "
+                         "Prefer External Mic; in Brave use Download if the player is silent."),
+    "add_to_companion_btn": "Add to Companion",
+    "recording_ready_label": "Recording ready · level {pct}%",
+    "recording_silent_warn": ("Recording looks silent. Try External Mic, Check level until the bar "
+                              "moves, Record again."),
+    "heard_label": "Heard: “{q}”",
+    "preview_download_expander": "Preview / download your take",
+    "your_recording_label": "Your recording · level {pct}%",
+    "type_question_heading": "Or type a question",
+    "question_placeholder": "Ask something about the story…",
+    "ask_btn": "Ask", "theatre_json_expander": "Theatre script JSON",
+    "voice_already_captured": "Voice already captured for this story. Re-generate to record a new sample.",
+    "old_recorder_hint": ("Streamlit's old recorder often used a different (silent) device. Use this "
+                          "panel: Listen until the bar moves, then Record/Stop on the same mic."),
+    "wait_stage_listen": "Listening to your question…",
+    "wait_stage_think": "Thinking about it…",
+    "wait_stage_voice": "Voicing the reply…",
+    "wait_reassure_voice": "Voicing takes about a minute on this machine — the page will update on its own.",
+    "wait_reassure_type": "This can take under a minute — the page will update on its own.",
+    "wait_ready": "Ready — added below in order",
+    "wait_failed": "That didn't work. Try asking again.",
+    "wait_elapsed_fmt": "{time} elapsed",
+    "continue_stage_write": "Writing the next beat…",
+    "continue_stage_narrate": "Narrating with your voice…",
+    "continue_stage_done": "Next beat ready — added below in order",
+    "continue_reassure": "Writing and narrating can take a minute or two — the page will update on its own.",
 }
 PLAYFUL_EN = {
     "title": "Story Time!",
@@ -843,6 +961,52 @@ PLAYFUL_EN = {
     "fallback_img": "I can't read pictures yet — here's a story to try instead!",
     "need_source": "Add a picture or book to begin!",
     "need_voice": "Pick, upload, or record a voice!",
+    "download": "Download", "download_preview": "Download preview WAV",
+    "atmos_line": "{atmos}: {n_chapters} chapter(s) · {total} sentences · {beats} beat(s) in order",
+    "full_story_heading": "Play entire story so far",
+    "full_story_caption": "Optional: one player for all narrated story audio. The feed below is the chronological log.",
+    "full_story_label": "Full story audio",
+    "full_story_not_ready": "Full-story audio isn't ready yet (missing sentence clips).",
+    "follow_along_expander": "Sentence follow-along (optional)",
+    "follow_along_hint": "Jump to a single sentence if you want — not required for listening.",
+    "this_sentence_label": "This sentence",
+    "companion_heading": "Story & Companion — in order",
+    "companion_caption": ("Top → bottom is time order: original story, then each question, answer, "
+                          "or Continue beat as it happened. New actions always append below."),
+    "chapter_fallback": "Chapter", "play_chapter_label": "Play · {title}",
+    "your_question_label": "Your question", "narrator_reply_label": "Narrator reply",
+    "add_next_heading": "Add next",
+    "add_next_caption": ("TTS **{backend}** · {n} sentences so far. Continue or ask — "
+                         "each result appends at the bottom of the feed above."),
+    "continue_story_btn": "Continue story",
+    "ask_voice_heading": "Ask with your voice",
+    "ask_voice_caption": ("Check level = meter only. Record/Stop, then click Add to Companion below. "
+                         "Prefer External Mic; in Brave use Download if the player is silent."),
+    "add_to_companion_btn": "Add to Companion",
+    "recording_ready_label": "Recording ready · level {pct}%",
+    "recording_silent_warn": ("Recording looks silent. Try External Mic, Check level until the bar "
+                              "moves, Record again."),
+    "heard_label": "Heard: “{q}”",
+    "preview_download_expander": "Preview / download your take",
+    "your_recording_label": "Your recording · level {pct}%",
+    "type_question_heading": "Or type a question",
+    "question_placeholder": "Ask something about the story…",
+    "ask_btn": "Ask", "theatre_json_expander": "Theatre script JSON",
+    "voice_already_captured": "Voice already captured for this story. Re-generate to record a new sample.",
+    "old_recorder_hint": ("Streamlit's old recorder often used a different (silent) device. Use this "
+                          "panel: Listen until the bar moves, then Record/Stop on the same mic."),
+    "wait_stage_listen": "Listening in…",
+    "wait_stage_think": "Having a think…",
+    "wait_stage_voice": "Finding my voice…",
+    "wait_reassure_voice": "Finding my voice can take about a minute — hang tight, the page updates on its own.",
+    "wait_reassure_type": "This can take under a minute — hang tight, the page updates on its own.",
+    "wait_ready": "All done — added below!",
+    "wait_failed": "Oops, that didn't work. Try asking again!",
+    "wait_elapsed_fmt": "{time} elapsed",
+    "continue_stage_write": "Dreaming up what happens next…",
+    "continue_stage_narrate": "Narrating with your voice…",
+    "continue_stage_done": "Next bit's ready — added below!",
+    "continue_reassure": "This can take a minute or two — hang tight, the page updates on its own.",
 }
 
 FORMAL_ZH = {
@@ -871,6 +1035,47 @@ FORMAL_ZH = {
     "fallback_img": "图片转故事功能尚未接入——改为显示内置的示例故事。",
     "need_source": "请先添加一本故事书或图片。",
     "need_voice": "请选择、上传或录制一把声音。",
+    "download": "下载", "download_preview": "下载预览录音",
+    "atmos_line": "{atmos}：{n_chapters} 章 · {total} 句 · {beats} 个片段（按顺序）",
+    "full_story_heading": "播放目前的完整故事",
+    "full_story_caption": "可选：用一个播放器播放所有已朗读的故事音频。下方是按时间顺序的记录。",
+    "full_story_label": "完整故事音频",
+    "full_story_not_ready": "完整故事音频还没准备好（缺少句子片段）。",
+    "follow_along_expander": "逐句跟读（可选）",
+    "follow_along_hint": "如果需要，可以跳到某一句——收听时并非必须。",
+    "this_sentence_label": "这一句",
+    "companion_heading": "故事与问答 —— 按顺序",
+    "companion_caption": "从上到下按时间顺序：先是原始故事，接着是每个提问、回答或续写片段。新内容会一直加在最下方。",
+    "chapter_fallback": "章节", "play_chapter_label": "播放 · {title}",
+    "your_question_label": "你的提问", "narrator_reply_label": "旁白回覆",
+    "add_next_heading": "继续添加",
+    "add_next_caption": "TTS **{backend}** · 目前共 {n} 句。继续故事或提问——结果会加在上方记录的最下面。",
+    "continue_story_btn": "继续故事",
+    "ask_voice_heading": "用你的声音提问",
+    "ask_voice_caption": "试听音量只是音量表。录音/停止后，点击下方的加入问答。建议使用外接麦克风；在 Brave 浏览器中若播放器无声，请改用下载。",
+    "add_to_companion_btn": "加入问答",
+    "recording_ready_label": "录音已就绪 · 音量 {pct}%",
+    "recording_silent_warn": "录音似乎是静音的。请尝试外接麦克风，试听音量直到指示条移动，再重新录音。",
+    "heard_label": "听到：「{q}」",
+    "preview_download_expander": "预览/下载你的录音",
+    "your_recording_label": "你的录音 · 音量 {pct}%",
+    "type_question_heading": "或输入文字提问",
+    "question_placeholder": "问一些关于故事的问题……",
+    "ask_btn": "提问", "theatre_json_expander": "剧本脚本 JSON",
+    "voice_already_captured": "本故事已经录好声音了。要录新的，请重新生成。",
+    "old_recorder_hint": "Streamlit 内建的录音器常常用到别的（无声）设备。请用这个面板：先试听直到指示条移动，再用同一个麦克风录音/停止。",
+    "wait_stage_listen": "正在听你的问题……",
+    "wait_stage_think": "正在思考……",
+    "wait_stage_voice": "正在配音……",
+    "wait_reassure_voice": "配音大约需要一分钟，页面会自动更新。",
+    "wait_reassure_type": "这可能需要不到一分钟，页面会自动更新。",
+    "wait_ready": "已完成——已加在下方",
+    "wait_failed": "没有成功，请再试一次。",
+    "wait_elapsed_fmt": "已用 {time}",
+    "continue_stage_write": "正在续写下一段……",
+    "continue_stage_narrate": "正在用你的声音朗读……",
+    "continue_stage_done": "下一段已就绪——已加在下方",
+    "continue_reassure": "续写和朗读可能需要一两分钟，页面会自动更新。",
 }
 
 PLAYFUL_ZH = {
@@ -899,6 +1104,47 @@ PLAYFUL_ZH = {
     "fallback_img": "我还不会读图片——先给你讲个别的故事！",
     "need_source": "先加一张图片或一本书吧！",
     "need_voice": "先选、上传或录一把声音吧！",
+    "download": "下载", "download_preview": "下载预览录音",
+    "atmos_line": "{atmos}：{n_chapters} 章 · {total} 句 · {beats} 个片段（按顺序）",
+    "full_story_heading": "播放目前的完整故事",
+    "full_story_caption": "可选：用一个播放器播放所有已朗读的故事音频。下方是按时间顺序的记录。",
+    "full_story_label": "完整故事音频",
+    "full_story_not_ready": "完整故事音频还没准备好（缺少句子片段）。",
+    "follow_along_expander": "逐句跟读（可选）",
+    "follow_along_hint": "如果需要，可以跳到某一句——收听时并非必须。",
+    "this_sentence_label": "这一句",
+    "companion_heading": "故事与问答 —— 按顺序",
+    "companion_caption": "从上到下按时间顺序：先是原始故事，接着是每个提问、回答或续写片段。新内容会一直加在最下方。",
+    "chapter_fallback": "章节", "play_chapter_label": "播放 · {title}",
+    "your_question_label": "你的提问", "narrator_reply_label": "旁白回覆",
+    "add_next_heading": "继续添加",
+    "add_next_caption": "TTS **{backend}** · 目前共 {n} 句。继续故事或提问——结果会加在上方记录的最下面。",
+    "continue_story_btn": "继续故事",
+    "ask_voice_heading": "用你的声音提问",
+    "ask_voice_caption": "试听音量只是音量表。录音/停止后，点击下方的加入问答。建议使用外接麦克风；在 Brave 浏览器中若播放器无声，请改用下载。",
+    "add_to_companion_btn": "加入问答",
+    "recording_ready_label": "录音已就绪 · 音量 {pct}%",
+    "recording_silent_warn": "录音似乎是静音的。请尝试外接麦克风，试听音量直到指示条移动，再重新录音。",
+    "heard_label": "听到：「{q}」",
+    "preview_download_expander": "预览/下载你的录音",
+    "your_recording_label": "你的录音 · 音量 {pct}%",
+    "type_question_heading": "或输入文字提问",
+    "question_placeholder": "问一些关于故事的问题……",
+    "ask_btn": "提问", "theatre_json_expander": "剧本脚本 JSON",
+    "voice_already_captured": "本故事已经录好声音了。要录新的，请重新生成。",
+    "old_recorder_hint": "Streamlit 内建的录音器常常用到别的（无声）设备。请用这个面板：先试听直到指示条移动，再用同一个麦克风录音/停止。",
+    "wait_stage_listen": "听你说……",
+    "wait_stage_think": "让我想想……",
+    "wait_stage_voice": "正在找声音……",
+    "wait_reassure_voice": "找声音大约需要一分钟，别急，页面会自动更新。",
+    "wait_reassure_type": "这可能需要不到一分钟，别急，页面会自动更新。",
+    "wait_ready": "好啦——已经加在下面！",
+    "wait_failed": "呀，没有成功。再问一次看看！",
+    "wait_elapsed_fmt": "已用 {time}",
+    "continue_stage_write": "正在想接下来会发生什么……",
+    "continue_stage_narrate": "正在用你的声音朗读……",
+    "continue_stage_done": "下一段好啦——加在下面啦！",
+    "continue_reassure": "这可能需要一两分钟，别急，页面会自动更新。",
 }
 
 FORMAL = {"EN": FORMAL_EN, "ZH": FORMAL_ZH}
@@ -922,6 +1168,8 @@ DEFAULT_VOICES = {
                "path": "assets/voices/bright.wav"},
     "gentle": {"EN": "Gentle bedtime",   "ZH": "轻声哄睡",       "face": "🌙",
                "path": "assets/voices/gentle.wav"},
+    "minion":  {"EN": "Minion",          "ZH": "小黄人",         "face": "🍌",
+               "path": "assets/voices/minion.wav"},
 }
 
 # Looping background atmosphere, one file per emotion. Point these at your own
@@ -952,7 +1200,9 @@ THEMES = {
         "f_mono": "'IBM Plex Mono', ui-monospace, monospace",
         "app_bg": "radial-gradient(1100px 600px at 50% -10%,#16181F 0%,#0D0F13 60%)",
         "ink": "#F6F1E8", "ink_muted": "#CFC4B4", "ink_faint": "#9A9186",
-        "hair": "rgba(246,241,232,.10)", "surface": "rgba(246,241,232,.04)",
+        "hair": "rgba(246,241,232,.10)", "surface": "#1E2028",
+        "bg": "#12141A", "muted": "#B9B2A5", "hairline": "#33363F",
+        "accent": "#E0C48A", "on_accent": "#12141A",
         "grain": "rgba(246,241,232,.022)",
         "title_w": "600", "title_max": "46px", "kick_size": "11px",
         "kick_ls": ".16em", "kick_tt": "uppercase", "kick_w": "400",
@@ -986,9 +1236,9 @@ THEMES = {
         "audio_pad": "0", "audio_wrap_bg": "transparent",
         "audio_wrap_border": "1px solid rgba(246,241,232,.09)",
         "audio_wrap_radius": "0 0 18px 18px",
-        # Don't invert <audio> — Chromium often plays silent/broken media when
-        # CSS filter is applied to the native player (voice recordings included).
-        "audio_filter": "none",
+        "audio_filter": "invert(92%) hue-rotate(180deg) contrast(.92) saturate(.6)",
+        "disabled_ink": "#9A9384",
+        "success_bg": "unset", "success_ink": "unset", "scheme": "dark",
         "wave_h": "26px", "wave_radius": "2px", "wave_op": ".55",
         "progress": "bars", "prog_h": "3px", "prog_radius": "2px", "prog_gap": "4px",
         "prog_track": "rgba(246,241,232,.10)",
@@ -1021,7 +1271,9 @@ THEMES = {
         "f_mono": "'Nunito', system-ui, sans-serif",
         "app_bg": "#FFF9EE",
         "ink": "#2A2520", "ink_muted": "#5C5449", "ink_faint": "#8A7A60",
-        "hair": "rgba(42,37,32,.14)", "surface": "#FFFBF0",
+        "hair": "rgba(42,37,32,.14)", "surface": "#FFFDF7",
+        "bg": "#FFF9EE", "muted": "#6B6155", "hairline": "#E2D8C8",
+        "accent": "#F4845F", "on_accent": "#2A2520",
         "grain": "rgba(42,37,32,.05)",
         "title_w": "800", "title_max": "52px", "kick_size": "13px",
         "kick_ls": ".06em", "kick_tt": "uppercase", "kick_w": "800",
@@ -1055,6 +1307,9 @@ THEMES = {
         "audio_wrap_border": "3px solid #2A2520",
         "audio_wrap_radius": "0 0 24px 8px",
         "audio_filter": "none",
+        "disabled_ink": "#5A5148",
+        "success_bg": "#E6F4E9", "success_ink": "#1E5B32",
+        "scheme": "light",
         "wave_h": "30px", "wave_radius": "3px", "wave_op": ".85",
         "progress": "bars", "prog_h": "9px", "prog_radius": "5px", "prog_gap": "5px",
         "prog_track": "rgba(42,37,32,.12)",
@@ -1085,7 +1340,9 @@ THEMES = {
         "f_mono": "'Nunito', system-ui, sans-serif",
         "app_bg": "#EAF1FF",
         "ink": "#1B2A4A", "ink_muted": "#3C4E75", "ink_faint": "#5C77A8",
-        "hair": "rgba(27,42,74,.16)", "surface": "#F2F6FF",
+        "hair": "rgba(27,42,74,.16)", "surface": "#FFFFFF",
+        "bg": "#EAF1FF", "muted": "#4A5B7D", "hairline": "#B9CBEC",
+        "accent": "#FFD166", "on_accent": "#1B2A4A",
         "grain": "rgba(27,42,74,.04)",
         "title_w": "800", "title_max": "52px", "kick_size": "13px",
         "kick_ls": ".08em", "kick_tt": "uppercase", "kick_w": "800",
@@ -1102,8 +1359,8 @@ THEMES = {
         "cta_border": "3px solid #1B2A4A",
         "card_border": "3px solid #1B2A4A", "card_radius": "18px",
         "card_pad_y": "40px", "card_pad_x": "36px",
-        "card_shadow": "0 0 0 4px #FFFFFF, 0 8px 16px -2px rgba({glow},.4)",
-        "spine": "rgba(27,42,74,.10)", "curl": "rgba(27,42,74,.08)",
+        "card_shadow": "0 6px 0 #1B2A4A, 0 0 0 4px #FFFFFF inset",
+        "spine": "rgba(27,42,74,.10)", "curl": "transparent",
         "story_size": "clamp(21px,5vw,29px)", "story_style": "normal",
         "story_w": "600",
         "meta_size": "12px", "meta_ls": ".12em", "meta_tt": "uppercase",
@@ -1111,7 +1368,7 @@ THEMES = {
         "badge_font": "'Baloo 2', cursive", "badge_w": "800",
         "badge_size": "clamp(13px,3vw,15px)", "badge_pad": "8px 16px",
         "badge_border": "3px solid #1B2A4A", "badge_ls": "0", "badge_tt": "none",
-        "badge_rot": "-10deg", "badge_glyph": "20px",
+        "badge_rot": "-1.5deg", "badge_glyph": "20px",
         "face_size": "60px", "face_font": "30px", "face_op": "1",
         "face_border": "3px solid #1B2A4A", "face_shadow": "0 4px 0 #1B2A4A",
         "face_gap": "76px",
@@ -1119,6 +1376,9 @@ THEMES = {
         "audio_wrap_border": "3px solid #1B2A4A",
         "audio_wrap_radius": "0 0 15px 15px",
         "audio_filter": "none",
+        "disabled_ink": "#3D4A63",
+        "success_bg": "#E6F4E9", "success_ink": "#1E5B32",
+        "scheme": "light",
         "wave_h": "26px", "wave_radius": "2px", "wave_op": ".9",
         "progress": "dots", "prog_h": "14px", "prog_radius": "999px",
         "prog_gap": "7px", "prog_track": "#FFFFFF",
@@ -1149,7 +1409,9 @@ THEMES = {
         "f_mono": "'Quicksand', system-ui, sans-serif",
         "app_bg": "#F4F1FA",
         "ink": "#332A4A", "ink_muted": "#5F5280", "ink_faint": "#9A8CB8",
-        "hair": "rgba(122,104,160,.22)", "surface": "#FFFDF9",
+        "hair": "rgba(122,104,160,.22)", "surface": "#FFFFFF",
+        "bg": "#F4F1FA", "muted": "#5C5175", "hairline": "#D6CFE6",
+        "accent": "#7A6CA0", "on_accent": "#FFFFFF",
         "grain": "rgba(74,62,104,.035)",
         "title_w": "700", "title_max": "48px", "kick_size": "12px",
         "kick_ls": ".14em", "kick_tt": "uppercase", "kick_w": "700",
@@ -1183,6 +1445,9 @@ THEMES = {
         "audio_wrap_border": "2px solid #C7BBE0",
         "audio_wrap_radius": "0 0 24px 10px",
         "audio_filter": "none",
+        "disabled_ink": "#5C5175",
+        "success_bg": "#E6F4E9", "success_ink": "#1E5B32",
+        "scheme": "light",
         "wave_h": "22px", "wave_radius": "3px", "wave_op": ".8",
         "progress": "track", "prog_h": "8px", "prog_radius": "5px",
         "prog_gap": "0", "prog_track": "#FFFFFF",
@@ -1251,6 +1516,13 @@ st.html(f"""
    even inside a style block's raw-text content, e.g. a stray angle-bracket
    pair in a comment). @import inside the style element sidesteps both. */
 @import url("https://fonts.googleapis.com/css2?family=Source+Serif+4:ital,opsz,wght@0,8..60,300..700;1,8..60,300..600&family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&family=Baloo+2:wght@400;500;600;700;800&family=Nunito:wght@400;600;700;800&family=Quicksand:wght@400;500;600;700&family=Noto+Sans+SC:wght@400;500;700;900&family=Noto+Serif+SC:wght@400;600;700&display=swap");
+/* Chrome picks native audio-element control icon colours (play triangle,
+   scrub thumb, volume, overflow menu) from color-scheme, not from our CSS —
+   that shadow-DOM panel ignores page styles entirely. Streamlit's base
+   theme leaves color-scheme:dark in effect everywhere, so light themes
+   got white-on-white invisible controls no CSS override could fix. */
+:root, html, body, .stApp, [data-testid="stAppViewContainer"]{{
+  color-scheme: {T['scheme']}; }}
 :root{{ --ink:{T['ink']}; --muted:{T['ink_muted']}; --faint:{T['ink_faint']};
         --hair:{T['hair']}; --step:8px; }}
 .stApp{{ background:{T['app_bg']}; }}
@@ -1258,28 +1530,88 @@ st.html(f"""
 header[data-testid="stHeader"]{{ background:transparent; }}
 html, body, [class*="css"], .stMarkdown{{ font-family:{T['f_ui']}; color:var(--ink); }}
 
+/* Section headings (st.subheader/markdown ####) fall through to Streamlit's
+   own dark-mode-aware default otherwise, which is near-white — invisible on
+   the three light themes. Pin explicitly to the theme's ink color. */
+h1, h2, h3, h4, [data-testid="stHeading"] h1, [data-testid="stHeading"] h2,
+[data-testid="stHeading"] h3, [data-testid="stHeading"] h4{{
+  color:{T['ink']} !important; font-family:{T['f_display']};
+  -webkit-text-fill-color:{T['ink']} !important; }}
+
 /* Picker row container (st.container(border=True)) */
 [data-testid="stVerticalBlockBorderWrapper"]{{
   background:{T['surface']}; border:{T['card_border']} !important;
   border-radius:{T['up_radius']}; padding:calc(var(--step)*1.5) calc(var(--step)*2);
   margin-bottom:calc(var(--step)*3); }}
 
-/* Segmented control — Streamlit renders options as
-   stBaseButton-segmented_control (unselected) / -segmented_controlActive
-   (selected), grouped in a stButtonGroup. Style both states from theme
-   tokens so the selected option never shows Streamlit's default red. */
+/* Expanders (locked-settings summary, sentence follow-along, theatre JSON):
+   Streamlit's own summary-label color falls through to a near-white default
+   in light themes — same missing-ink bug as headings. The collapsed summary
+   also has no border/background of its own without this, which is why
+   Crayon's locked-settings row read as "a lone floating emoji". */
+[data-testid="stExpander"]{{
+  background:{T['surface']}; border:{T['card_border']} !important;
+  border-radius:{T['card_radius']}; margin-bottom:calc(var(--step)*2); }}
+/* The summary element itself carries its own dark background from
+   Streamlit's defaults — styling only the parent container (above) left
+   it a solid near-black bar with near-black text in every non-Classic
+   theme. */
+[data-testid="stExpander"] summary{{
+  background:{T['surface']} !important; color:{T['ink']} !important;
+  border:1px solid {T['hairline']}; border-radius:{T['card_radius']}; }}
+[data-testid="stExpander"] summary *, [data-testid="stExpander"] summary svg{{
+  color:{T['ink']} !important; -webkit-text-fill-color:{T['ink']} !important;
+  fill:{T['ink']} !important; }}
+
+/* "Recording ready" success banner: Streamlit's default success green reads
+   as pale-on-pale (~2:1) in the light themes; Classic's is already fine
+   (kept via the "unset" token so this rule is a no-op there). */
+[data-testid="stAlertContentSuccess"]{{ background:{T['success_bg']} !important; }}
+[data-testid="stAlertContentSuccess"] p{{ color:{T['success_ink']} !important; }}
+
+/* Ask text input renders as a near-black slab by default in light themes —
+   the last unthemed dark object on the page. */
+[data-testid="stTextInput"] input{{
+  background:{T['surface']} !important; color:{T['ink']} !important;
+  border:{T['card_border']} !important; }}
+[data-testid="stTextInput"] input::placeholder{{ color:var(--muted) !important; opacity:1; }}
+
+/* Manual eyebrow label — matches the auto-generated segmented_control label
+   style, for spots (like the Setup card's "2 · WHO READS IT?" column) that
+   need the same look but aren't a widget's own label. */
+.cs-eyebrow{{ font-family:{T['f_mono']}; font-size:11px; letter-spacing:.1em;
+  text-transform:uppercase; color:var(--muted) !important; margin:0 0 8px; }}
+
+/* Setup card: story-source + voice as two equal-weight columns with a
+   hairline divider, so the empty space under a short uploader reads as a
+   deliberate column boundary instead of a stray gap. */
+.st-key-setup_card [data-testid="stHorizontalBlock"] > [data-testid="stColumn"]:first-child{{
+  border-right:1px solid var(--hair); padding-right:calc(var(--step)*3); }}
+
+/* Segmented control — individual options carry NO data-testid at all in
+   this Streamlit version (verified live: they're plain
+   button[data-variant="segmented_control"][role="radio"], selected marked
+   by aria-checked="true"/data-selected="true"). The stBaseButton-segmented_control
+   / -segmented_controlActive testids this file assumed for a long time
+   never matched anything, so every "selected" pill on screen all session
+   was Streamlit's own unstyled default — never actually themed. */
 [data-testid="stButtonGroup"]{{ flex-wrap:wrap; gap:6px; }}
 [data-testid="stButtonGroup"] [data-testid="stWidgetLabel"] p{{
   font-family:{T['f_mono']}; font-size:11px; letter-spacing:.1em;
   text-transform:uppercase; color:var(--muted) !important; }}
-[data-testid^="stBaseButton-segmented_control"]{{
+/* Unselected = surface + full ink text; selected = filled accent + on_accent
+   text. Selected should read as the strongest item, not the faintest. */
+button[data-variant="segmented_control"]{{
   font-family:{T['f_display']}; font-weight:{T['btn_w']}; font-size:14px;
   min-height:40px; border-radius:{T['btn_radius']};
-  background:{T['btn_bg']} !important; color:{T['btn_ink']} !important;
-  border:{T['btn_border']} !important; transition:background .2s ease; }}
-[data-testid="stBaseButton-segmented_controlActive"]{{
-  background:{T['cta_bg']} !important; color:{T['cta_ink']} !important;
-  border:{T['cta_border']} !important; font-weight:800; }}
+  background:{T['surface']} !important; color:{T['ink']} !important;
+  border:1px solid {T['hairline']} !important; transition:background .2s ease; }}
+button[data-variant="segmented_control"] *{{ color:{T['ink']} !important; }}
+button[data-variant="segmented_control"][aria-checked="true"]{{
+  background:{T['accent']} !important;
+  border:1px solid {T['accent']} !important; font-weight:800; }}
+button[data-variant="segmented_control"][aria-checked="true"] *{{
+  color:{T['on_accent']} !important; }}
 [data-testid="stRadio"] label p{{
   font-family:{T['f_display']}; font-weight:{T['btn_w']}; font-size:14px;
   color:var(--ink) !important; }}
@@ -1350,11 +1682,63 @@ html, body, [class*="css"], .stMarkdown{{ font-family:{T['f_ui']}; color:var(--i
   border:2px dashed {T['ink_faint']} !important; }}
 .stButton > button:disabled, .stButton > button:disabled p,
 .stButton > button:disabled span, .stButton > button:disabled div{{
-  color:var(--muted) !important; -webkit-text-fill-color:var(--muted) !important; }}
+  color:{T['disabled_ink']} !important; -webkit-text-fill-color:{T['disabled_ink']} !important; }}
 .stButton > button[kind="primary"]{{ background:{T['cta_bg']}; color:{T['cta_ink']};
-  border:{T['cta_border']}; font-weight:800; box-shadow:{T['btn_shadow']}; }}
+  border:{T['cta_border']}; font-weight:800 !important; box-shadow:{T['btn_shadow']}; }}
+.stButton > button[kind="primary"] p{{ font-weight:800 !important; }}
+
+/* st.status() (e.g. "Narrating with your voice…") renders as an unstyled
+   white bar with no theme presence. */
+[data-testid="stStatusWidget"]{{ background:{T['surface']} !important;
+  border:none !important; border-left:3px solid {T['accent']} !important;
+  border-radius:{T['card_radius']}; }}
+[data-testid="stStatusWidget"] *{{ color:{T['ink']} !important; }}
+/* Elapsed clock in the label ticks every 0.5s (_run_staged) — tabular-nums
+   keeps the digits from jittering the layout as they change. */
+[data-testid="stStatusWidget"] p{{ font-variant-numeric:tabular-nums; }}
+
+/* A text_input disabled while a wait is running (Ask box) needs the same
+   full-opacity, dashed-border treatment as .cs-disabled — plain :disabled
+   opacity would make it look broken rather than temporarily locked. */
+.stTextInput input:disabled{{ opacity:1 !important;
+  color:{T['disabled_ink']} !important; -webkit-text-fill-color:{T['disabled_ink']} !important;
+  background:{T['bg']} !important; border:1px dashed {T['hairline']} !important; }}
+
+/* One-shot highlight on the feed entry that just arrived after a long
+   silent wait, so its appearance is obvious rather than a silent pop-in. */
+@keyframes cs-flash-in{{
+  0%{{ background:color-mix(in oklch,{T['accent']} 30%,transparent); }}
+  100%{{ background:transparent; }}
+}}
+.st-key-tl_flash{{ animation:cs-flash-in 1.2s ease-out; border-radius:{T['card_radius']}; }}
+
+/* Streamlit dims any disabled widget (uploaders, selects, segmented
+   controls, camera input) to ~40% opacity by default, which read as
+   unreadable ghosting against these theme surfaces once locked — giving no
+   way to tell disabled from broken. Full opacity, muted (still ≥4.5:1) ink
+   instead. Utility class for any future disabled section that wants the
+   same treatment plus a visible reason line, in ink not muted. */
+.cs-disabled, .cs-disabled *{{ opacity:1 !important; color:{T['muted']} !important; }}
+.cs-disabled input, .cs-disabled button{{ background:{T['bg']} !important;
+  border:1px dashed {T['hairline']} !important; cursor:not-allowed; }}
+.cs-disabled-reason{{ color:{T['ink']} !important; font-weight:600;
+  padding:calc(var(--step)*1) calc(var(--step)*1.5); border-left:3px solid {T['accent']};
+  background:{T['surface']}; margin-bottom:calc(var(--step)*1.5); }}
+[data-testid="stVerticalBlockBorderWrapper"] :disabled,
+[data-testid="stVerticalBlockBorderWrapper"] [aria-disabled="true"]{{
+  opacity:1 !important; }}
+[data-testid="stVerticalBlockBorderWrapper"] :disabled *,
+[data-testid="stVerticalBlockBorderWrapper"] [aria-disabled="true"] *{{
+  opacity:1 !important; color:{T['muted']} !important;
+  -webkit-text-fill-color:{T['muted']} !important; }}
 .cs-need{{ text-align:center; font-size:13px; color:var(--muted) !important;
   margin:calc(var(--step)*1) 0 0; }}
+
+/* Commit strip — reuses the .cs-step chip look from the empty state to show
+   "is the story ready? is the voice ready?" before the CTA. */
+.cs-commit{{ display:flex; align-items:center; justify-content:center; gap:12px;
+  flex-wrap:wrap; margin:0 0 calc(var(--step)*2); }}
+.cs-commit-arrow{{ color:var(--faint); font-size:14px; }}
 
 .cs-empty{{ position:relative; overflow:hidden; text-align:center;
   border:{T['empty_border']}; border-radius:{T['empty_radius']};
@@ -1396,7 +1780,7 @@ html, body, [class*="css"], .stMarkdown{{ font-family:{T['f_ui']}; color:var(--i
   font-size:{T['badge_size']}; letter-spacing:{T['badge_ls']};
   text-transform:{T['badge_tt']}; padding:{T['badge_pad']}; border-radius:999px;
   border:{T['badge_border']}; transform:rotate({T['badge_rot']});
-  margin-bottom:calc(var(--step)*1.5);
+  margin-bottom:calc(var(--step)*2);
   transition:background .8s ease, color .8s ease, border-color .8s ease; }}
 .cs-badge span{{ font-size:{T['badge_glyph']}; line-height:1; display:inline-block; }}
 @keyframes cs-bob{{ 0%,100%{{transform:translateY(0)}} 50%{{transform:translateY(-4px)}} }}
@@ -1476,11 +1860,40 @@ html, body, [class*="css"], .stMarkdown{{ font-family:{T['f_ui']}; color:var(--i
    is shared by every widget on the page — closing it here would mean
    overriding that gap globally, at the cost of spacing everywhere else,
    so it's left as the documented limit of a display-layer-only fix. */
-/* Do NOT style native <audio> (background/border/filter/height). Chromium can
-   keep the scrubber moving while sending silence — especially on headphone
-   devices. Leave players unstyled. Ambience is mixed server-side into each
-   sentence's own clip (pipeline.audio_utils.mix_ambience_under_narration),
-   not played as a separate widget, so there's nothing to hide here. */
+/* Ambience is mixed server-side into each sentence's own clip
+   (pipeline.audio_utils.mix_ambience_under_narration), not played as a
+   separate widget — so the only styling needed here is the native player
+   itself, per the comment above. */
+/* Only width/height/radius on the native element — height:44px + padding +
+   a 999px pill previously crushed the control panel down to a strip with
+   no visible play triangle/scrubber/volume in the light themes. Border and
+   background live on the wrapper container below instead. */
+audio[data-testid="stAudio"]{{ width:100% !important; height:44px !important;
+  border-radius:12px !important; }}
+
+/* Themed shell every audio player sits inside — a real st.container(border=True)
+   detected via :has(), not a hand-written div (those don't nest around
+   sibling widgets and render as empty ghost boxes instead). */
+[data-testid="stVerticalBlockBorderWrapper"]:has(audio[data-testid="stAudio"]){{
+  background:{T['surface']} !important; border:{T['card_border']} !important;
+  border-radius:{T['card_radius']}; padding:12px 14px; }}
+
+/* Download buttons default to a near-black slab in every theme; pull them
+   from the same tokens as regular buttons so they read as secondary, not
+   off-palette chrome. */
+[data-testid="stDownloadButton"] button{{
+  background:{T['surface']} !important; color:{T['ink']} !important;
+  border:{T['card_border']} !important; border-radius:{T['btn_radius']} !important;
+  font-family:{T['btn_font']}; font-weight:{T['btn_w']}; }}
+[data-testid="stDownloadButton"] button:hover{{ transform:translateY(-1px); }}
+
+/* Companion Q&A uses st.chat_message, which renders as flat Streamlit-grey
+   by default — give it the same page-corner card treatment as story cards. */
+[data-testid="stChatMessage"]{{
+  background:{T['surface']} !important; border:{T['card_border']};
+  border-radius:{T['card_radius']}; padding:calc(var(--step)*2);
+  margin:calc(var(--step)*1.5) 0; }}
+[data-testid="stChatMessage"] p{{ color:{T['ink']} !important; }}
 
 .cs-progress{{ display:flex; gap:{T['prog_gap']}; align-items:center;
   margin:calc(var(--step)*3) 0 calc(var(--step)*1.5); }}
@@ -1557,31 +1970,65 @@ with st.container(border=True):
 # INPUTS
 # ---------------------------------------------------------------------------
 
-if st.session_state.source is None:
-    # segmented_control deselects (-> None) if its active option is clicked
-    # again; a widget-bound key can't be reassigned after instantiation, so
-    # this must run before the widget below, not after.
-    st.session_state.source = "PDF"
-srcs = {"PDF": C["src_pdf"], "Picture": C["src_img"], "Camera": C["src_cam"]}
-if hasattr(st, "segmented_control"):
-    st.segmented_control(C["src_label"], list(srcs),
-                         format_func=lambda k: srcs[k], key="source")
-else:
-    st.radio(C["src_label"], list(srcs), format_func=lambda k: srcs[k],
-             key="source", horizontal=True)
-src = st.session_state.source
+# Only Theme/Language/Ambience stay changeable once a story exists — every
+# other setup control is disabled (not hidden, so its value keeps resolving
+# normally below) and the whole card collapses into a summary.
+locked = bool(st.session_state.story)
 
-c1, c2 = st.columns(2, gap="medium")
+if locked:
+    if st.session_state.voice_mode == "Own":
+        voice_summary = C["v_own"]
+    else:
+        vp = st.session_state.voice_preset
+        voice_summary = f'{DEFAULT_VOICES[vp]["face"]} {DEFAULT_VOICES[vp][LANG]}'
+    src_face = {"PDF": "📄", "Picture": "🖼", "Camera": "📷"}.get(st.session_state.source, "📄")
+    src_summary_raw = {"PDF": C["src_pdf"], "Picture": C["src_img"], "Camera": C["src_cam"]}[st.session_state.source]
+    # Playful copy already prefixes its own emoji (e.g. "🖼 Picture") — strip it
+    # so it doesn't duplicate the src_face glyph added below ("🖼 🖼 Picture").
+    src_summary = re.sub(r"^[^\w\s]+\s*", "", src_summary_raw).strip()
+    lock_kicker = "设置已锁定" if LANG == "ZH" else "Settings · locked"
+    story_lang_name = "中文" if st.session_state.story_lang == "ZH" else "English"
+    story_lang_field = f"故事语言：{story_lang_name}" if LANG == "ZH" else f"Story language: {story_lang_name}"
+    locked_label = f"🔒 {lock_kicker} — {src_face} {src_summary} · {voice_summary} · {story_lang_field}"
+    setup_card = st.expander(locked_label, expanded=False)
+else:
+    setup_card = st.container(border=True, key="setup_card")
+
+with setup_card:
+    c1, c2 = st.columns([1, 1], gap="large")
+
 with c1:
+    step2_label = "2 · 谁来读？" if LANG == "ZH" else "2 · Who reads it?"
+    st.html(f'<p class="cs-eyebrow">1 · {C["src_label"]}</p>')
+    if st.session_state.source is None:
+        # segmented_control deselects (-> None) if its active option is clicked
+        # again; a widget-bound key can't be reassigned after instantiation, so
+        # this must run before the widget below, not after.
+        st.session_state.source = "PDF"
+    srcs = {"PDF": C["src_pdf"], "Picture": C["src_img"], "Camera": C["src_cam"]}
+    if hasattr(st, "segmented_control"):
+        st.segmented_control(C["src_label"], list(srcs),
+                             format_func=lambda k: srcs[k], key="source",
+                             label_visibility="collapsed", disabled=locked)
+    else:
+        st.radio(C["src_label"], list(srcs), format_func=lambda k: srcs[k],
+                 key="source", horizontal=True, label_visibility="collapsed",
+                 disabled=locked)
+    src = st.session_state.source
+
     if src == "PDF":
-        story_file = st.file_uploader(C["up_pdf"], type=["pdf"])
+        story_file = st.file_uploader(C["up_pdf"], type=["pdf"], key="story_pdf_uploader",
+                                      disabled=locked)
     elif src == "Camera":
         st.caption(C["cam_hint"])
-        story_file = st.camera_input(C["src_cam"], label_visibility="collapsed")
+        story_file = st.camera_input(C["src_cam"], label_visibility="collapsed",
+                                     key="story_camera_input", disabled=locked)
     else:
         story_file = st.file_uploader(C["up_img"],
-                                      type=["png", "jpg", "jpeg", "webp"])
+                                      type=["png", "jpg", "jpeg", "webp"],
+                                      key="story_img_uploader", disabled=locked)
 with c2:
+    st.html(f'<p class="cs-eyebrow">{step2_label}</p>')
     if st.session_state.voice_mode is None:
         st.session_state.voice_mode = "Default"
     if st.session_state.own_voice_method is None:
@@ -1590,10 +2037,12 @@ with c2:
     if hasattr(st, "segmented_control"):
         st.segmented_control(C["v_label"], list(vmodes),
                              format_func=lambda k: vmodes[k],
-                             key="voice_mode", label_visibility="collapsed")
+                             key="voice_mode", label_visibility="collapsed",
+                             disabled=locked)
     else:
         st.radio(C["v_label"], list(vmodes), format_func=lambda k: vmodes[k],
-                 key="voice_mode", horizontal=True, label_visibility="collapsed")
+                 key="voice_mode", horizontal=True, label_visibility="collapsed",
+                 disabled=locked)
 
     if st.session_state.voice_mode == "Own":
         own_methods = {"Upload": C["own_upload"], "Record": C["own_record"]}
@@ -1604,6 +2053,7 @@ with c2:
                 format_func=lambda k: own_methods[k],
                 key="own_voice_method",
                 label_visibility="collapsed",
+                disabled=locked,
             )
         else:
             st.radio(
@@ -1613,10 +2063,11 @@ with c2:
                 key="own_voice_method",
                 horizontal=True,
                 label_visibility="collapsed",
+                disabled=locked,
             )
         if st.session_state.own_voice_method == "Record":
             if st.session_state.story:
-                st.caption("Voice already captured for this story. Re-generate to record a new sample.")
+                st.caption(C["voice_already_captured"])
                 if st.session_state.get("recorded_voice_wav"):
                     voice_file = _BytesVoice(
                         st.session_state["recorded_voice_wav"], "recording.wav"
@@ -1625,11 +2076,13 @@ with c2:
                     voice_file = None
             else:
                 st.caption(C["rec_hint"])
-                st.caption(
-                    "Streamlit’s old recorder often used a different (silent) device. "
-                    "Use this panel: Listen until the bar moves, then Record/Stop on the **same** mic."
+                st.caption(C["old_recorder_hint"])
+                payload = record_voice(
+                    key="storyteller_mic",
+                    bg=T["surface"], ink=T["ink"], border=T["card_border"],
+                    field_bg=T["btn_bg"], cta=T["cta_bg"], cta_ink=T["cta_ink"],
+                    lang=LANG.lower(),
                 )
-                payload = record_voice(key="storyteller_mic")
                 voice_file = None
                 if payload and payload.get("data_b64"):
                     try:
@@ -1645,7 +2098,8 @@ with c2:
                     voice_file = _BytesVoice(wav_bytes, "recording.wav")
                     _preview_wav_bytes(wav_bytes, peak=0.5)
         else:
-            voice_file = st.file_uploader(C["up_voice"], type=["wav", "mp3", "m4a", "webm", "ogg"])
+            voice_file = st.file_uploader(C["up_voice"], type=["wav", "mp3", "m4a", "webm", "ogg"],
+                                          key="voice_file_uploader", disabled=locked)
             if voice_file is not None:
                 try:
                     raw = _read_voice_bytes(voice_file)
@@ -1665,7 +2119,8 @@ with c2:
             C["v_pick"], keys,
             index=keys.index(st.session_state.voice_preset),
             format_func=lambda k: f'{DEFAULT_VOICES[k]["face"]}  '
-                                  f'{DEFAULT_VOICES[k][LANG]}')
+                                  f'{DEFAULT_VOICES[k][LANG]}',
+            key="voice_preset_select", disabled=locked)
         st.session_state.voice_preset = pick
         path = _voice_asset_path(DEFAULT_VOICES[pick]["path"])
         voice_file = str(path) if path.exists() else None
@@ -1679,16 +2134,48 @@ with c2:
                 peak = float(seg.max) / float(seg.max_possible_amplitude or 1)
                 _preview_wav_bytes(raw if raw[:4] == b"RIFF" else raw, peak=peak)
             except Exception:
-                st.audio(voice_file)
+                with st.container(border=True):
+                    st.audio(voice_file)
         else:
             st.warning(C["v_missing"])
 
+if locked:
+    with setup_card:
+        if st.button(
+            "🔄 " + ("修改设置并重新开始" if LANG == "ZH" else "Change settings & start over"),
+            use_container_width=True,
+        ):
+            for k in ("story", "story_lang", "full_story_audio", "story_chapters", "dir", "autoplay",
+                      "used_fallback", "illustration", "narrator_voice_bytes",
+                      "companion_session", "ambience_by_emotion", "theatre_script",
+                      "recorded_voice_wav", "pending_question_wav", "last_question_wav",
+                      "last_ask_sig"):
+                st.session_state[k] = None
+            st.session_state.idx = 0
+            st.rerun()
+
 ready = bool(story_file and voice_file)
-go = st.button(C["cta"], type="primary" if ready else "secondary",
-               disabled=not ready, use_container_width=True)
-if not ready:
-    missing = C["need_source"] if not story_file else C["need_voice"]
-    st.html(f'<p class="cs-need">{missing}</p>')
+go = False
+if not locked:
+    st.html(
+        '<div class="cs-commit">'
+        f'<span class="cs-step" data-done="{1 if story_file else 0}">'
+        f'{"✓" if story_file else "○"} {C["src_label"]}</span>'
+        '<span class="cs-commit-arrow">→</span>'
+        f'<span class="cs-step" data-done="{1 if voice_file else 0}">'
+        f'{"✓" if voice_file else "○"} {C["v_label"]}</span>'
+        '</div>'
+    )
+    go = st.button(C["cta"], type="primary" if ready else "secondary",
+                   disabled=not ready, use_container_width=True)
+    if not ready:
+        missing = C["need_source"] if not story_file else C["need_voice"]
+        st.html(f'<p class="cs-need">{missing}</p>')
+    else:
+        gen_lang_name = "中文" if LANG == "ZH" else "English"
+        lock_caption = (f"点击后设置将锁定 — 故事将以<strong>{gen_lang_name}</strong>朗读。主题仍可切换。" if LANG == "ZH"
+                        else f"Settings lock once you press this — the story will be narrated in <strong>{gen_lang_name}</strong>. Theme stays changeable.")
+        st.html(f'<p class="cs-need">{lock_caption}</p>')
 
 # ---------------------------------------------------------------------------
 # GENERATE (backend untouched — only the loading presentation is themed)
@@ -1768,6 +2255,7 @@ if go:
         pass
 
     st.session_state.story = story
+    st.session_state.story_lang = LANG
     st.session_state.used_fallback = story is MOCK_STORY_PAGES
     st.session_state.idx = 0
     st.session_state.dir = "fwd"
@@ -1818,6 +2306,14 @@ if not st.session_state.story:
             f'<div class="cs-steps">{chips}</div></div>')
     st.stop()
 
+if st.session_state.story_lang and st.session_state.story_lang != LANG:
+    other_name = "中文" if st.session_state.story_lang == "ZH" else "English"
+    mismatch_caption = (
+        f"界面已切换为中文。本故事以{other_name}朗读 — 重新开始即可换成其他语言。" if LANG == "ZH"
+        else f"Interface switched to English. This story was narrated in {other_name} — start over to hear it in another language."
+    )
+    st.html(f'<p class="cs-need">{mismatch_caption}</p>')
+
 # ---------------------------------------------------------------------------
 # FLATTEN (schema untouched)
 # ---------------------------------------------------------------------------
@@ -1859,26 +2355,26 @@ timeline = _ensure_story_timeline()
 n_chapters = sum(1 for ev in timeline if ev.get("kind") == "chapter")
 
 st.html(
-    f'<div class="cs-badge" style="background:{e["chip"]};color:{e["chip_ink"]}">'
+    f'<div class="cs-badge" style="background:color-mix(in oklch,{e["chip"]} 35%,{T["surface"]});color:{T["ink"]}">'
     f'<span style="animation:{e["wig"]}">{e["face"]}</span>'
-    f'{C["atmos"]}: {n_chapters} chapter(s) · {total} sentences · '
-    f'{len(timeline)} beat(s) in order</div>'
+    f'{C["atmos_line"].format(atmos=C["atmos"], n_chapters=n_chapters, total=total, beats=len(timeline))}'
+    f'</div>'
 )
 
-st.subheader("Play entire story so far")
-st.caption("Optional: one player for all narrated story audio. The feed below is the chronological log.")
+st.subheader(C["full_story_heading"])
+st.caption(C["full_story_caption"])
 if full_wav:
     _st_play_wav(
         full_wav,
-        label="Full story audio",
+        label=C["full_story_label"],
         download_name="storyteller_full_story.wav",
         key="full_story",
     )
 else:
-    st.warning("Full-story audio isn’t ready yet (missing sentence clips).")
+    st.warning(C["full_story_not_ready"])
 
-with st.expander("Sentence follow-along (optional)", expanded=False):
-    st.caption("Jump to a single sentence if you want — not required for listening.")
+with st.expander(C["follow_along_expander"], expanded=False):
+    st.caption(C["follow_along_hint"])
     bars = "".join(
         f'<i style="background:{e["line"]};animation-delay:{(n % 9) * .11:.2f}s;'
         f'height:{30 + (n * 41) % 70}%"></i>' for n in range(26)
@@ -1894,7 +2390,7 @@ with st.expander("Sentence follow-along (optional)", expanded=False):
           <span>Page {page_no}</span>
           <span class="cs-dot" style="background:{e['line']}"></span>
           <span>{i + 1}/{total}</span></div>
-        <p class="cs-text"><span class="cs-face-spacer"></span>{sent.get("text", "")}</p>
+        <p class="cs-text"><span class="cs-face-spacer"></span>{_strip_emotion_tags(sent.get("text", ""))}</p>
         <div class="cs-speaker" style="opacity:.8">
           <i style="background:{e['line']}"></i>{sent.get("speaker", "narrator")}</div>
         <div class="cs-wave">{bars}</div>
@@ -1904,9 +2400,10 @@ with st.expander("Sentence follow-along (optional)", expanded=False):
     if sent.get("audio_path"):
         clip = sent["audio_path"]
         if isinstance(clip, (bytes, bytearray)):
-            _st_play_wav(bytes(clip), label="This sentence", download_name="sentence.wav", key=f"sent_{i}")
+            _st_play_wav(bytes(clip), label=C["this_sentence_label"], download_name="sentence.wav", key=f"sent_{i}")
         else:
-            st.audio(clip)
+            with st.container(border=True):
+                st.audio(clip)
     n1, n2, n3 = st.columns(3)
     with n1:
         if st.button(C["prev"], disabled=i == 0, use_container_width=True, key="sent_prev"):
@@ -1923,74 +2420,102 @@ with st.expander("Sentence follow-along (optional)", expanded=False):
 st.session_state.autoplay = False
 
 st.html('<hr class="cs-rule">')
-st.subheader("Story & Companion — in order")
-st.caption(
-    "Top → bottom is time order: original story, then each question, answer, "
-    "or Continue beat as it happened. New actions always append below."
-)
+st.subheader(C["companion_heading"])
+st.caption(C["companion_caption"])
 
-for ti, ev in enumerate(timeline):
+def _render_timeline_entry(ti, ev):
     kind = ev.get("kind")
     audio = ev.get("audio")
     if kind == "chapter":
         face = e["face"]
+        title = ev.get("title") or C["chapter_fallback"]
         st.html(
-            f'<div class="cs-badge" style="background:{e["chip"]};color:{e["chip_ink"]};margin-top:12px">'
-            f'<span style="animation:{e["wig"]}">{face}</span>{ev.get("title", f"Chapter")}</div>'
+            f'<div class="cs-badge" style="background:color-mix(in oklch,{e["chip"]} 35%,{T["surface"]});'
+            f'color:{T["ink"]};margin-top:12px">'
+            f'<span style="animation:{e["wig"]}">{face}</span>{title}</div>'
         )
-        st.markdown(ev.get("text") or "")
+        st.markdown(_strip_emotion_tags(ev.get("text") or ""))
         if isinstance(audio, (bytes, bytearray)) and audio:
             _st_play_wav(
                 bytes(audio),
-                label=f"Play · {ev.get('title', 'Chapter')}",
+                label=C["play_chapter_label"].format(title=title),
                 download_name=f"timeline_{ti}.wav",
                 key=f"tl_{ti}",
             )
     elif kind == "user":
         with st.chat_message("user"):
-            st.markdown(ev.get("text") or "")
+            st.markdown(_strip_emotion_tags(ev.get("text") or ""))
             if isinstance(audio, (bytes, bytearray)) and audio:
                 _st_play_wav(
                     bytes(audio),
-                    label="Your question",
+                    label=C["your_question_label"],
                     download_name=f"q_{ti}.wav",
                     key=f"tl_{ti}",
                 )
     else:
         with st.chat_message("assistant"):
-            st.markdown(ev.get("text") or "")
+            st.markdown(_strip_emotion_tags(ev.get("text") or ""))
             if isinstance(audio, (bytes, bytearray)) and audio:
                 _st_play_wav(
                     bytes(audio),
-                    label="Narrator reply",
+                    label=C["narrator_reply_label"],
                     download_name=f"a_{ti}.wav",
                     key=f"tl_{ti}",
                 )
+
+
+flash_ti = len(timeline) - 1 if st.session_state.get("flash_new_entry") else -1
+for ti, ev in enumerate(timeline):
+    if ti == flash_ti:
+        with st.container(key="tl_flash"):
+            _render_timeline_entry(ti, ev)
+    else:
+        _render_timeline_entry(ti, ev)
+if flash_ti >= 0:
+    st.session_state.flash_new_entry = False
 
 # ---------------------------------------------------------------------------
 # CONTROLS — always at the bottom so the feed stays chronological
 # ---------------------------------------------------------------------------
 st.html('<hr class="cs-rule">')
 heard_index = (total - 1) if st.session_state.full_story_audio else i
-st.subheader("Add next")
-st.caption(
-    f"TTS **{TTS_BACKEND}** · {total} sentences so far. "
-    "Continue or ask — each result appends at the bottom of the feed above."
-)
+st.subheader(C["add_next_heading"])
+st.caption(C["add_next_caption"].format(backend=TTS_BACKEND, n=total))
 
-if st.button("Continue story", type="primary", use_container_width=True, key="continue_story_btn"):
+wait_busy = bool(st.session_state.get("wait_kind"))
+
+wait_error = st.session_state.get("wait_error")
+if wait_error:
+    st.error(wait_error["summary"])
+    with st.expander("Details", expanded=False):
+        st.code(wait_error["detail"])
+
+if st.button(C["continue_story_btn"], type="primary", use_container_width=True,
+             key="continue_story_btn", disabled=wait_busy):
+    st.session_state.wait_error = None
+    st.session_state.wait_kind = "continue"
+    st.rerun()
+
+if st.session_state.get("wait_kind") == "continue":
     try:
         _continue_story_beat(heard_index=heard_index)
-        st.rerun()
     except Exception as exc:
-        st.error(f"Continue story failed: {type(exc).__name__}: {exc}")
+        st.session_state.wait_error = {
+            "summary": f"Continue story failed: {type(exc).__name__}: {exc}",
+            "detail": f"{type(exc).__name__}: {exc}",
+        }
+    finally:
+        st.session_state.wait_kind = None
+    st.rerun()
 
-st.markdown("##### Ask with your voice")
-st.caption(
-    "**Check level** = meter only. **Record/Stop**, then click **Add to Companion** below. "
-    "Prefer External Mic; in Brave use Download if the player is silent."
+st.markdown(f"##### {C['ask_voice_heading']}")
+st.caption(C["ask_voice_caption"])
+ask_payload = record_voice(
+    key="companion_ask_mic",
+    bg=T["surface"], ink=T["ink"], border=T["card_border"],
+    field_bg=T["btn_bg"], cta=T["cta_bg"], cta_ink=T["cta_ink"],
+    lang=LANG.lower(),
 )
-ask_payload = record_voice(key="companion_ask_mic")
 if isinstance(ask_payload, dict) and ask_payload.get("data_b64"):
     # Prefer take_id — WebM files share identical base64 *prefixes*, so [:96] collided
     sig = (
@@ -2014,59 +2539,106 @@ pending = st.session_state.get("pending_question_wav")
 preview = st.session_state.get("last_question_wav")
 if pending:
     peak = float(st.session_state.get("pending_question_peak") or 0)
-    st.success(f"Recording ready · level {int(peak * 100)}%")
+    st.success(C["recording_ready_label"].format(pct=int(peak * 100)))
     # Button first — heavy players used to push it below the fold / fail before render
     if peak < 0.02:
-        st.error(
-            "Recording looks silent. Try External Mic, Check level until the bar moves, Record again."
-        )
+        st.error(C["recording_silent_warn"])
     else:
         if st.button(
-            "Add to Companion",
+            C["add_to_companion_btn"],
             type="primary",
             use_container_width=True,
             key="send_q",
+            disabled=wait_busy,
         ):
-            raw = pending
-            try:
-                client, _ = _openai_compatible_client()
-                question = transcribe_wav_bytes(
-                    client, raw, language=STORY_LANGUAGE[LANG]
-                )
-                st.info(f"Heard: “{question}”")
-                _handle_companion_question(
-                    question, heard_index=heard_index, question_audio=raw
-                )
-                st.session_state.pending_question_wav = None
-                st.session_state.last_question_wav = None
-                st.session_state.last_ask_sig = None
-                st.rerun()
-            except Exception as exc:
-                st.error(f"Voice question failed: {type(exc).__name__}: {exc}")
-    with st.expander("Preview / download your take", expanded=True):
+            st.session_state.wait_error = None
+            st.session_state.wait_kind = "voice_q"
+            st.rerun()
+    with st.expander(C["preview_download_expander"], expanded=True):
         _st_play_wav(
             preview or pending,
-            label=f"Your recording · level {int(peak * 100)}%",
+            label=C["your_recording_label"].format(pct=int(peak * 100)),
             download_name="my_question.mp3",
             key="q_persistent",
         )
 
-st.markdown("##### Or type a question")
+if st.session_state.get("wait_kind") == "voice_q":
+    raw = st.session_state.get("pending_question_wav")
+    box = st.status(C["wait_stage_listen"], expanded=True)
+    st.caption(C["wait_reassure_voice"])
+    try:
+        client, _ = _openai_compatible_client()
+        question = _run_staged(
+            box, C["wait_stage_listen"],
+            transcribe_wav_bytes, client, raw, language=STORY_LANGUAGE[LANG],
+        )
+        if not (question or "").strip():
+            raise ValueError("Recording didn't transcribe to any text — try recording again.")
+        st.info(C["heard_label"].format(q=question))
+        _handle_companion_question(
+            question, heard_index=heard_index, question_audio=raw, status_box=box
+        )
+        box.update(label=C["wait_ready"], state="complete")
+        st.session_state.pending_question_wav = None
+        st.session_state.last_question_wav = None
+        st.session_state.last_ask_sig = None
+        st.session_state.flash_new_entry = True
+    except Exception as exc:
+        box.update(label=C["wait_failed"], state="error")
+        st.session_state.wait_error = {
+            "summary": C["wait_failed"],
+            "detail": f"{type(exc).__name__}: {exc}",
+        }
+    finally:
+        st.session_state.wait_kind = None
+    st.rerun()
+
+st.markdown(f"##### {C['type_question_heading']}")
+# Deferred clear: writing session_state[key] for a widget AFTER that widget
+# has rendered in the same run raises StreamlitAPIException — so the actual
+# clear happens here, before the text_input below is instantiated.
+if st.session_state.pop("clear_typed_question", False):
+    st.session_state.typed_question_input = ""
 typed_cols = st.columns([4, 1])
 with typed_cols[0]:
     typed_q = st.text_input(
         "Question",
         value="",
-        placeholder="Ask something about the story…",
+        placeholder=C["question_placeholder"],
         label_visibility="collapsed",
         key="typed_question_input",
+        disabled=wait_busy,
     )
 with typed_cols[1]:
-    send_typed = st.button("Ask", use_container_width=True, key="typed_ask_btn")
+    send_typed = st.button(C["ask_btn"], use_container_width=True, key="typed_ask_btn",
+                            disabled=wait_busy)
 if send_typed and (typed_q or "").strip():
-    _handle_companion_question(typed_q.strip(), heard_index=heard_index)
+    st.session_state.wait_error = None
+    st.session_state.wait_kind = "typed_q"
+    st.session_state.wait_typed_q = typed_q.strip()
+    st.rerun()
+
+if st.session_state.get("wait_kind") == "typed_q":
+    box = st.status(C["wait_stage_think"], expanded=True)
+    st.caption(C["wait_reassure_type"])
+    try:
+        _handle_companion_question(
+            st.session_state.get("wait_typed_q") or "", heard_index=heard_index, status_box=box
+        )
+        box.update(label=C["wait_ready"], state="complete")
+        st.session_state.flash_new_entry = True
+        st.session_state.clear_typed_question = True
+    except Exception as exc:
+        box.update(label=C["wait_failed"], state="error")
+        st.session_state.wait_error = {
+            "summary": C["wait_failed"],
+            "detail": f"{type(exc).__name__}: {exc}",
+        }
+    finally:
+        st.session_state.wait_kind = None
+        st.session_state.wait_typed_q = None
     st.rerun()
 
 if st.session_state.theatre_script:
-    with st.expander("Theatre script JSON"):
+    with st.expander(C["theatre_json_expander"]):
         st.json(st.session_state.theatre_script)

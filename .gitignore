@@ -5,3 +5,4 @@ venv/
 .streamlit/secrets.toml
 .pytest_cache/
 tmp/
+assets/sfx_cache/
