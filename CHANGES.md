@@ -54,15 +54,20 @@ Vision / picture / camera stories still generate directly in the selected langua
 | Custom mic component (device list, Check level, Record) | `mic_component/` |
 | Prefer External Mic; hide Steam/virtual devices; dedupe labels | `mic_component/frontend/index.html` |
 | Unique `take_id` so WebM header prefixes don’t drop new takes | same + `app.py` |
-| In-iframe preview + **Push to app** | `mic_component/frontend/index.html` |
+| In-iframe preview + **Add to Companion** (`intent=submit` starts Whisper + Q&A) | `mic_component/frontend/index.html`, `app.py` |
+| Iframe height floor so player + Add button aren’t clipped after Record | `mic_component/frontend/index.html` |
+| Component id bumped (`storyteller_mic_recorder_v4`) to bust browser cache | `mic_component/__init__.py` |
 | Stereo/48k + MP3 + download for Brave/Chrome headphones | `app.py` (`_for_browser_playback`, `_st_play_wav`) |
-| Defer Whisper until **Send question** after preview | `app.py` |
+| Typed **Ask** moved above mic panel (tall iframe was hiding the text box) | `app.py` |
+| Companion reply flash banner under controls + timeline entry | `app.py` (`flash_companion_answer`) |
 
 ## UI / product behavior
 
-- Full-story WAV player plus chapter / timeline feed.
-- Sentence follow-along moved to an optional expander.
+- Full-story WAV player; **Read along** expander (sentence view + prev/next) directly under it.
+- Chronological **Story & Companion — in order** feed (chapters, Q&A, continues).
+- Controls at bottom: **Continue story** → **Type a question** → **Ask with your voice**.
 - Built-in voice assets / generator script: `assets/voices/`, `scripts/generate_builtin_voices.py`.
+- Demo walkthrough: `docs/DEMO_SCRIPT.md`.
 - Secrets example updated; real keys stay in ignored `.streamlit/secrets.toml`.
 
 ## Waiting-state indicators (2026-08-07)
@@ -80,7 +85,7 @@ Vision / picture / camera stories still generate directly in the selected langua
 ## Tests & docs
 
 - New/updated: translate, companion, continue/ASR, theatre, orchestrator, story_gen tests.
-- `README.md`, `CHANGES.md`, design spec §11, Companion addendum §9 updated (2026-08-06).
+- `README.md`, `CHANGES.md`, `docs/DEMO_SCRIPT.md`, design spec §11, Companion addendum §9 updated (2026-08-07).
 
 ## Not committed
 

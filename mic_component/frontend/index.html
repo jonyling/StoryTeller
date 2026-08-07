@@ -16,16 +16,22 @@
       --mic-cta: #c45c48;
       --mic-cta-ink: #fff;
     }
-    body {
+    html, body {
       margin: 0;
+      padding: 0;
+      overflow: visible;
+    }
+    body {
       font: 13px/1.35 system-ui, sans-serif;
       color: var(--mic-ink);
       background: transparent;
+      /* Ensure scrollHeight grows with the preview block (iframe was clipping it). */
+      min-height: 160px;
     }
     .box {
       border: 1px solid var(--mic-border);
       border-radius: 10px;
-      padding: 10px 12px;
+      padding: 10px 12px 14px;
       background: var(--mic-bg);
     }
     .row { display: flex; align-items: center; gap: 8px; margin-top: 8px; flex-wrap: wrap; }
@@ -66,12 +72,12 @@
       <div id="pct">0%</div>
     </div>
     <div id="status">With headphones: pick External Mic / Realtek. Check level (bar must move), then Record.</div>
-    <div id="previewWrap" style="display:none;margin-top:10px;">
-      <audio id="previewAudio" controls style="width:100%;height:36px;"></audio>
+    <div id="previewWrap" style="display:none;margin-top:12px;padding-bottom:8px;">
+      <audio id="previewAudio" controls preload="auto" style="width:100%;height:40px;display:block;"></audio>
       <div id="previewHint" style="margin-top:6px;opacity:.8;font-size:12px;">
-        Preview above. Below the mic box, click <b>Add to Companion</b>. If missing, tap Push again.
+        Play the take above, then click <b>Add to Companion</b>.
       </div>
-      <button id="pushBtn" type="button" class="primary" style="margin-top:8px;width:100%;">Push to app</button>
+      <button id="pushBtn" type="button" class="primary" style="margin-top:8px;width:100%;min-height:36px;">Add to Companion</button>
     </div>
   </div>
 
@@ -127,8 +133,12 @@
         levelCheckOn: "Level check on… speak. Then Record/Stop (same mic). Playback is the player below — not this button.",
         micChanged: "Mic changed. Click Check level to verify the bar moves, then Record.",
         nothingToPush: "Nothing to push — Record first.",
-        previewHint: 'Preview above. Below the mic box, click <b>Add to Companion</b>. If missing, tap Push again.',
-        pushBtn: "Push to app",
+        previewHint: "Play the take above, then click <b>Add to Companion</b>.",
+        pushBtn: "Add to Companion",
+        sentOk: (kb, peak) =>
+          "Ready · " + kb + " KB · peak " + peak + "%. Click Add to Companion to get an answer.",
+        pushedSubmit: (kb, peak) =>
+          "Sent to Companion · " + kb + " KB · peak " + peak + "%. Working on your answer…",
       },
       zh: {
         title: "<b>试听音量＋录音</b> —— 两者使用同一个设备（避免 Streamlit 内建录音器无声）。",
@@ -141,8 +151,12 @@
         levelCheckOn: "试听中……请说话。然后录音/停止（同一个麦克风）。播放请用下方播放器——不是这个按钮。",
         micChanged: "麦克风已更改。点击试听音量确认指示条移动，再录音。",
         nothingToPush: "还没有可推送的内容——请先录音。",
-        previewHint: '上方为预览。在录音框下方点击<b>加入问答</b>。若没看到，请再次点击推送。',
-        pushBtn: "推送到应用",
+        previewHint: "先播放上方录音，再点击<b>加入问答</b>。",
+        pushBtn: "加入问答",
+        sentOk: (kb, peak) =>
+          "已就绪 · " + kb + " KB · 峰值 " + peak + "%。点击「加入问答」获取回答。",
+        pushedSubmit: (kb, peak) =>
+          "已送入问答 · " + kb + " KB · 峰值 " + peak + "%。正在回答……",
       },
     };
     let lang = "en";
@@ -174,11 +188,16 @@
     function setStatus(msg) { status.textContent = msg; }
 
     function bumpHeight() {
-      // No artificial floor — a fixed 220px minimum left ~120px of dead
-      // space below the panel whenever there was no preview/recording yet
-      // to fill it. scrollHeight already reflects the real content height
-      // (hidden elements are display:none, so they don't inflate it).
-      Streamlit.setFrameHeight(document.body.scrollHeight);
+      // When preview is open, force enough room — scrollHeight alone was measured
+      // before layout finished and Streamlit clipped the player + Add button.
+      const previewOpen = previewWrap.style.display !== "none";
+      const measured = Math.max(
+        document.documentElement.scrollHeight || 0,
+        document.body.scrollHeight || 0,
+        document.body.offsetHeight || 0
+      );
+      const need = previewOpen ? 380 : 180;
+      Streamlit.setFrameHeight(Math.max(measured + 8, need));
     }
 
     function showLocalPreview(blob, payload) {
@@ -188,17 +207,33 @@
       previewAudio.src = lastBlobUrl;
       previewWrap.style.display = "block";
       bumpHeight();
+      // Double-rAF + delayed bumps so audio controls finish layout
+      requestAnimationFrame(() => requestAnimationFrame(bumpHeight));
+      setTimeout(bumpHeight, 80);
+      setTimeout(bumpHeight, 250);
+      setTimeout(bumpHeight, 500);
     }
 
-    function pushPayload(payload) {
+    function pushPayload(payload, intent) {
       // Unique take id every push — WebM headers make data_b64 prefixes collide
-      const stamped = Object.assign({}, payload, { take_id: Date.now() + "_" + Math.random().toString(36).slice(2) });
+      const stamped = Object.assign({}, payload, {
+        take_id: Date.now() + "_" + Math.random().toString(36).slice(2),
+        intent: intent || "preview",
+      });
       lastPayload = stamped;
+      bumpHeight();
       Streamlit.setComponentValue(stamped);
+      const kb = Math.round((payload.bytes || 0) / 1024);
+      const peakPct = Math.round((payload.peak || 0) * 100);
       setStatus(
-        "Sent " + Math.round((payload.bytes || 0) / 1024) + " KB · peak " +
-        Math.round((payload.peak || 0) * 100) + "%. Scroll just below → Add to Companion."
+        intent === "submit"
+          ? t("pushedSubmit", kb, peakPct)
+          : t("sentOk", kb, peakPct)
       );
+      // Streamlit's render after setComponentValue used to shrink the iframe — re-bump.
+      setTimeout(bumpHeight, 50);
+      setTimeout(bumpHeight, 200);
+      setTimeout(bumpHeight, 400);
     }
 
     function writeString(view, offset, str) {
@@ -487,7 +522,7 @@
             bytes: buf.byteLength,
           };
           showLocalPreview(blob, payload);
-          pushPayload(payload);
+          setTimeout(() => pushPayload(payload, "preview"), 280);
           return;
         }
         const wavBlob = new Blob([wavBuf], { type: "audio/wav" });
@@ -498,7 +533,8 @@
           bytes: wavBuf.byteLength,
         };
         showLocalPreview(wavBlob, payload);
-        pushPayload(payload);
+        // Delay push so iframe height expands first (otherwise Streamlit clips the controls)
+        setTimeout(() => pushPayload(payload, "preview"), 280);
       };
 
       mediaRecorder.start(200);
@@ -523,7 +559,8 @@
         setStatus(t("nothingToPush"));
         return;
       }
-      pushPayload(lastPayload);
+      // intent=submit tells Python to run Whisper + Companion (preview push alone does not)
+      pushPayload(lastPayload, "submit");
     });
     devicesEl.addEventListener("change", () => {
       stopMonitor();
@@ -550,13 +587,16 @@
     window.addEventListener("message", (event) => {
       if (event.data?.type === "streamlit:render") {
         applyTheme(event.data.args);
-        Streamlit.setFrameHeight(document.body.scrollHeight);
+        // Never shrink below the preview floor — a plain scrollHeight reset was
+        // clipping the player + Add to Companion after each Streamlit rerun.
+        bumpHeight();
+        setTimeout(bumpHeight, 100);
       }
     });
 
     listDevices().then(() => {
       Streamlit.setComponentReady();
-      Streamlit.setFrameHeight(document.body.scrollHeight || 180);
+      bumpHeight();
     });
   </script>
 </body>

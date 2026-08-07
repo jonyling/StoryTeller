@@ -78,7 +78,8 @@ for k, v in {"theme": "Classic", "lang": "EN", "sfx": False, "story": None,
              "wait_typed_q": None,
              "wait_error": None,
              "clear_typed_question": False,
-             "flash_new_entry": False}.items():
+             "flash_new_entry": False,
+             "flash_companion_answer": None}.items():
     st.session_state.setdefault(k, v)
 
 # Real generation config. Story language reuses the EN/ZH picker.
@@ -624,6 +625,11 @@ def _handle_companion_question(
     asst_turn = {"role": "assistant", "text": answer, "audio": audio}
     st.session_state.companion_chat.append(asst_turn)
     _append_timeline({"kind": "assistant", "text": answer, "audio": audio})
+    # Persist a short banner under the controls so the reply is obvious without scrolling
+    st.session_state.flash_companion_answer = {
+        "question": q,
+        "answer": answer,
+    }
 
 
 def _concat_wav_clips(clips: list[bytes], *, gap_ms: int = 400) -> bytes | None:
@@ -890,11 +896,14 @@ FORMAL_EN = {
     "download": "Download", "download_preview": "Download preview WAV",
     "atmos_line": "{atmos}: {n_chapters} chapter(s) · {total} sentences · {beats} beat(s) in order",
     "full_story_heading": "Play entire story so far",
-    "full_story_caption": "Optional: one player for all narrated story audio. The feed below is the chronological log.",
+    "full_story_caption": ("One player for all narrated story audio. Open **Read along** below for "
+                           "sentence-by-sentence text, emotion badge, and prev/next. The feed further "
+                           "down is the chronological log."),
     "full_story_label": "Full story audio",
     "full_story_not_ready": "Full-story audio isn't ready yet (missing sentence clips).",
-    "follow_along_expander": "Sentence follow-along (optional)",
-    "follow_along_hint": "Jump to a single sentence if you want — not required for listening.",
+    "follow_along_expander": "Read along",
+    "follow_along_hint": "One sentence at a time — page flip, speaker/emotion badge, and per-sentence audio.",
+    "dismiss_reply_btn": "Dismiss reply",
     "this_sentence_label": "This sentence",
     "companion_heading": "Story & Companion — in order",
     "companion_caption": ("Top → bottom is time order: original story, then each question, answer, "
@@ -906,7 +915,7 @@ FORMAL_EN = {
                          "each result appends at the bottom of the feed above."),
     "continue_story_btn": "Continue story",
     "ask_voice_heading": "Ask with your voice",
-    "ask_voice_caption": ("Check level = meter only. Record/Stop, then click Add to Companion below. "
+    "ask_voice_caption": ("Check level = meter only. Record/Stop → player + Add to Companion appear in the mic box. "
                          "Prefer External Mic; in Brave use Download if the player is silent."),
     "add_to_companion_btn": "Add to Companion",
     "recording_ready_label": "Recording ready · level {pct}%",
@@ -915,7 +924,7 @@ FORMAL_EN = {
     "heard_label": "Heard: “{q}”",
     "preview_download_expander": "Preview / download your take",
     "your_recording_label": "Your recording · level {pct}%",
-    "type_question_heading": "Or type a question",
+    "type_question_heading": "Type a question",
     "question_placeholder": "Ask something about the story…",
     "ask_btn": "Ask", "theatre_json_expander": "Theatre script JSON",
     "voice_already_captured": "Voice already captured for this story. Re-generate to record a new sample.",
@@ -964,11 +973,14 @@ PLAYFUL_EN = {
     "download": "Download", "download_preview": "Download preview WAV",
     "atmos_line": "{atmos}: {n_chapters} chapter(s) · {total} sentences · {beats} beat(s) in order",
     "full_story_heading": "Play entire story so far",
-    "full_story_caption": "Optional: one player for all narrated story audio. The feed below is the chronological log.",
+    "full_story_caption": ("One player for all narrated story audio. Open **Read along** below for "
+                           "sentence-by-sentence text, emotion badge, and prev/next. The feed further "
+                           "down is the chronological log."),
     "full_story_label": "Full story audio",
     "full_story_not_ready": "Full-story audio isn't ready yet (missing sentence clips).",
-    "follow_along_expander": "Sentence follow-along (optional)",
-    "follow_along_hint": "Jump to a single sentence if you want — not required for listening.",
+    "follow_along_expander": "Read along",
+    "follow_along_hint": "One sentence at a time — page flip, speaker/emotion badge, and per-sentence audio.",
+    "dismiss_reply_btn": "Dismiss reply",
     "this_sentence_label": "This sentence",
     "companion_heading": "Story & Companion — in order",
     "companion_caption": ("Top → bottom is time order: original story, then each question, answer, "
@@ -980,7 +992,7 @@ PLAYFUL_EN = {
                          "each result appends at the bottom of the feed above."),
     "continue_story_btn": "Continue story",
     "ask_voice_heading": "Ask with your voice",
-    "ask_voice_caption": ("Check level = meter only. Record/Stop, then click Add to Companion below. "
+    "ask_voice_caption": ("Check level = meter only. Record/Stop → player + Add to Companion appear in the mic box. "
                          "Prefer External Mic; in Brave use Download if the player is silent."),
     "add_to_companion_btn": "Add to Companion",
     "recording_ready_label": "Recording ready · level {pct}%",
@@ -989,7 +1001,7 @@ PLAYFUL_EN = {
     "heard_label": "Heard: “{q}”",
     "preview_download_expander": "Preview / download your take",
     "your_recording_label": "Your recording · level {pct}%",
-    "type_question_heading": "Or type a question",
+    "type_question_heading": "Type a question",
     "question_placeholder": "Ask something about the story…",
     "ask_btn": "Ask", "theatre_json_expander": "Theatre script JSON",
     "voice_already_captured": "Voice already captured for this story. Re-generate to record a new sample.",
@@ -1038,11 +1050,13 @@ FORMAL_ZH = {
     "download": "下载", "download_preview": "下载预览录音",
     "atmos_line": "{atmos}：{n_chapters} 章 · {total} 句 · {beats} 个片段（按顺序）",
     "full_story_heading": "播放目前的完整故事",
-    "full_story_caption": "可选：用一个播放器播放所有已朗读的故事音频。下方是按时间顺序的记录。",
+    "full_story_caption": ("用一个播放器播放所有已朗读的故事音频。展开下方**逐句跟读**可逐句阅读、"
+                           "查看情绪标签并翻页。再往下是按时间顺序的记录。"),
     "full_story_label": "完整故事音频",
     "full_story_not_ready": "完整故事音频还没准备好（缺少句子片段）。",
-    "follow_along_expander": "逐句跟读（可选）",
-    "follow_along_hint": "如果需要，可以跳到某一句——收听时并非必须。",
+    "follow_along_expander": "逐句跟读",
+    "follow_along_hint": "一次一句——翻页、说话人/情绪标签，以及该句音频。",
+    "dismiss_reply_btn": "关闭回复",
     "this_sentence_label": "这一句",
     "companion_heading": "故事与问答 —— 按顺序",
     "companion_caption": "从上到下按时间顺序：先是原始故事，接着是每个提问、回答或续写片段。新内容会一直加在最下方。",
@@ -1059,7 +1073,7 @@ FORMAL_ZH = {
     "heard_label": "听到：「{q}」",
     "preview_download_expander": "预览/下载你的录音",
     "your_recording_label": "你的录音 · 音量 {pct}%",
-    "type_question_heading": "或输入文字提问",
+    "type_question_heading": "输入文字提问",
     "question_placeholder": "问一些关于故事的问题……",
     "ask_btn": "提问", "theatre_json_expander": "剧本脚本 JSON",
     "voice_already_captured": "本故事已经录好声音了。要录新的，请重新生成。",
@@ -1107,11 +1121,13 @@ PLAYFUL_ZH = {
     "download": "下载", "download_preview": "下载预览录音",
     "atmos_line": "{atmos}：{n_chapters} 章 · {total} 句 · {beats} 个片段（按顺序）",
     "full_story_heading": "播放目前的完整故事",
-    "full_story_caption": "可选：用一个播放器播放所有已朗读的故事音频。下方是按时间顺序的记录。",
+    "full_story_caption": ("用一个播放器播放所有已朗读的故事音频。展开下方**逐句跟读**可逐句阅读、"
+                           "查看情绪标签并翻页。再往下是按时间顺序的记录。"),
     "full_story_label": "完整故事音频",
     "full_story_not_ready": "完整故事音频还没准备好（缺少句子片段）。",
-    "follow_along_expander": "逐句跟读（可选）",
-    "follow_along_hint": "如果需要，可以跳到某一句——收听时并非必须。",
+    "follow_along_expander": "逐句跟读",
+    "follow_along_hint": "一次一句——翻页、说话人/情绪标签，以及该句音频。",
+    "dismiss_reply_btn": "关闭回复",
     "this_sentence_label": "这一句",
     "companion_heading": "故事与问答 —— 按顺序",
     "companion_caption": "从上到下按时间顺序：先是原始故事，接着是每个提问、回答或续写片段。新内容会一直加在最下方。",
@@ -1128,7 +1144,7 @@ PLAYFUL_ZH = {
     "heard_label": "听到：「{q}」",
     "preview_download_expander": "预览/下载你的录音",
     "your_recording_label": "你的录音 · 音量 {pct}%",
-    "type_question_heading": "或输入文字提问",
+    "type_question_heading": "输入文字提问",
     "question_placeholder": "问一些关于故事的问题……",
     "ask_btn": "提问", "theatre_json_expander": "剧本脚本 JSON",
     "voice_already_captured": "本故事已经录好声音了。要录新的，请重新生成。",
@@ -2508,91 +2524,7 @@ if st.session_state.get("wait_kind") == "continue":
         st.session_state.wait_kind = None
     st.rerun()
 
-st.markdown(f"##### {C['ask_voice_heading']}")
-st.caption(C["ask_voice_caption"])
-ask_payload = record_voice(
-    key="companion_ask_mic",
-    bg=T["surface"], ink=T["ink"], border=T["card_border"],
-    field_bg=T["btn_bg"], cta=T["cta_bg"], cta_ink=T["cta_ink"],
-    lang=LANG.lower(),
-)
-if isinstance(ask_payload, dict) and ask_payload.get("data_b64"):
-    # Prefer take_id — WebM files share identical base64 *prefixes*, so [:96] collided
-    sig = (
-        str(ask_payload.get("take_id") or "")
-        or f"{ask_payload.get('bytes')}_{ask_payload.get('peak')}_{ask_payload['data_b64'][-48:]}"
-    )
-    if st.session_state.get("last_ask_sig") != sig:
-        try:
-            wav_bytes, peak = recording_to_wav_bytes(ask_payload)
-            play_q = _for_browser_playback(wav_bytes)
-            st.session_state.last_question_wav = play_q or wav_bytes
-            st.session_state.pending_question_wav = wav_bytes
-            st.session_state.pending_question_peak = peak
-            st.session_state.last_ask_sig = sig
-            # Force a clean rerun so Add to Companion is visible (component updates can skip widgets)
-            st.rerun()
-        except Exception as exc:
-            st.error(f"Could not decode recording: {exc}")
-
-pending = st.session_state.get("pending_question_wav")
-preview = st.session_state.get("last_question_wav")
-if pending:
-    peak = float(st.session_state.get("pending_question_peak") or 0)
-    st.success(C["recording_ready_label"].format(pct=int(peak * 100)))
-    # Button first — heavy players used to push it below the fold / fail before render
-    if peak < 0.02:
-        st.error(C["recording_silent_warn"])
-    else:
-        if st.button(
-            C["add_to_companion_btn"],
-            type="primary",
-            use_container_width=True,
-            key="send_q",
-            disabled=wait_busy,
-        ):
-            st.session_state.wait_error = None
-            st.session_state.wait_kind = "voice_q"
-            st.rerun()
-    with st.expander(C["preview_download_expander"], expanded=True):
-        _st_play_wav(
-            preview or pending,
-            label=C["your_recording_label"].format(pct=int(peak * 100)),
-            download_name="my_question.mp3",
-            key="q_persistent",
-        )
-
-if st.session_state.get("wait_kind") == "voice_q":
-    raw = st.session_state.get("pending_question_wav")
-    box = st.status(C["wait_stage_listen"], expanded=True)
-    st.caption(C["wait_reassure_voice"])
-    try:
-        client, _ = _openai_compatible_client()
-        question = _run_staged(
-            box, C["wait_stage_listen"],
-            transcribe_wav_bytes, client, raw, language=STORY_LANGUAGE[LANG],
-        )
-        if not (question or "").strip():
-            raise ValueError("Recording didn't transcribe to any text — try recording again.")
-        st.info(C["heard_label"].format(q=question))
-        _handle_companion_question(
-            question, heard_index=heard_index, question_audio=raw, status_box=box
-        )
-        box.update(label=C["wait_ready"], state="complete")
-        st.session_state.pending_question_wav = None
-        st.session_state.last_question_wav = None
-        st.session_state.last_ask_sig = None
-        st.session_state.flash_new_entry = True
-    except Exception as exc:
-        box.update(label=C["wait_failed"], state="error")
-        st.session_state.wait_error = {
-            "summary": C["wait_failed"],
-            "detail": f"{type(exc).__name__}: {exc}",
-        }
-    finally:
-        st.session_state.wait_kind = None
-    st.rerun()
-
+# Typed ask first — the mic iframe is tall; keeping type-in below it hid the box.
 st.markdown(f"##### {C['type_question_heading']}")
 # Deferred clear: writing session_state[key] for a widget AFTER that widget
 # has rendered in the same run raises StreamlitAPIException — so the actual
@@ -2603,7 +2535,6 @@ typed_cols = st.columns([4, 1])
 with typed_cols[0]:
     typed_q = st.text_input(
         "Question",
-        value="",
         placeholder=C["question_placeholder"],
         label_visibility="collapsed",
         key="typed_question_input",
@@ -2637,6 +2568,120 @@ if st.session_state.get("wait_kind") == "typed_q":
     finally:
         st.session_state.wait_kind = None
         st.session_state.wait_typed_q = None
+    st.rerun()
+
+flash = st.session_state.get("flash_companion_answer")
+if flash:
+    st.success(
+        f"**You asked:** {flash.get('question', '')}\n\n"
+        f"**Companion:** {flash.get('answer', '')}"
+    )
+    if st.button(C["dismiss_reply_btn"], key="dismiss_flash_answer"):
+        st.session_state.flash_companion_answer = None
+        st.rerun()
+
+st.markdown(f"##### {C['ask_voice_heading']}")
+st.caption(C["ask_voice_caption"])
+ask_payload = record_voice(
+    key="companion_ask_mic",
+    bg=T["surface"], ink=T["ink"], border=T["card_border"],
+    field_bg=T["btn_bg"], cta=T["cta_bg"], cta_ink=T["cta_ink"],
+    lang=LANG.lower(),
+)
+if isinstance(ask_payload, dict) and ask_payload.get("data_b64"):
+    # Prefer take_id — WebM files share identical base64 *prefixes*, so [:96] collided
+    sig = (
+        str(ask_payload.get("take_id") or "")
+        or f"{ask_payload.get('bytes')}_{ask_payload.get('peak')}_{ask_payload['data_b64'][-48:]}"
+    )
+    if st.session_state.get("last_ask_sig") != sig:
+        try:
+            wav_bytes, peak = recording_to_wav_bytes(ask_payload)
+            play_q = _for_browser_playback(wav_bytes)
+            st.session_state.last_question_wav = play_q or wav_bytes
+            st.session_state.pending_question_wav = wav_bytes
+            st.session_state.pending_question_peak = peak
+            st.session_state.last_ask_sig = sig
+            # iframe "Add to Companion" sends intent=submit → start Q&A.
+            # Stop/auto-push is intent=preview → only stage the take.
+            if ask_payload.get("intent") == "submit" and peak >= 0.02:
+                st.session_state.wait_error = None
+                st.session_state.wait_kind = "voice_q"
+                # Fall through to the voice_q handler on this same run.
+            else:
+                st.rerun()
+        except Exception as exc:
+            st.error(f"Could not decode recording: {exc}")
+            with st.expander("Decode details", expanded=False):
+                st.code(
+                    f"{type(exc).__name__}: {exc}\n"
+                    f"mime={ask_payload.get('mime')!r} bytes={ask_payload.get('bytes')!r} "
+                    f"b64_len={len(ask_payload.get('data_b64') or '')}"
+                )
+
+pending = st.session_state.get("pending_question_wav")
+preview = st.session_state.get("last_question_wav")
+if pending and st.session_state.get("wait_kind") != "voice_q":
+    peak = float(st.session_state.get("pending_question_peak") or 0)
+    st.success(C["recording_ready_label"].format(pct=int(peak * 100)))
+    # Button first — heavy players used to push it below the fold / fail before render
+    if peak < 0.02:
+        st.error(C["recording_silent_warn"])
+    else:
+        if st.button(
+            C["add_to_companion_btn"],
+            type="primary",
+            use_container_width=True,
+            key="send_q",
+            disabled=wait_busy,
+        ):
+            st.session_state.wait_error = None
+            st.session_state.wait_kind = "voice_q"
+            st.rerun()
+    with st.expander(C["preview_download_expander"], expanded=True):
+        _st_play_wav(
+            preview or pending,
+            label=C["your_recording_label"].format(pct=int(peak * 100)),
+            download_name="my_question.mp3",
+            key="q_persistent",
+        )
+elif not pending:
+    st.caption(
+        "After Record/Stop, play the take, then click **Add to Companion** in the mic box "
+        "(that step starts the answer). Hard-refresh if the button is missing."
+    )
+
+if st.session_state.get("wait_kind") == "voice_q":
+    raw = st.session_state.get("pending_question_wav")
+    box = st.status(C["wait_stage_listen"], expanded=True)
+    st.caption(C["wait_reassure_voice"])
+    try:
+        if not raw:
+            raise ValueError("No recording in session — Record/Stop, then Add to Companion again.")
+        client, _ = _openai_compatible_client()
+        question = _run_staged(
+            box, C["wait_stage_listen"],
+            transcribe_wav_bytes, client, raw, language=STORY_LANGUAGE[LANG],
+        )
+        if not (question or "").strip():
+            raise ValueError("Recording didn't transcribe to any text — try recording again.")
+        st.info(C["heard_label"].format(q=question))
+        _handle_companion_question(
+            question, heard_index=heard_index, question_audio=raw, status_box=box
+        )
+        box.update(label=C["wait_ready"], state="complete")
+        st.session_state.pending_question_wav = None
+        st.session_state.last_question_wav = None
+        st.session_state.last_ask_sig = None
+        st.session_state.flash_new_entry = True
+    except Exception as exc:
+        box.update(label=C["wait_failed"], state="error")
+        st.session_state.wait_error = {
+            "summary": C["wait_failed"],
+            "detail": f"{type(exc).__name__}: {exc}",
+        }
+    finally:
+        st.session_state.wait_kind = None
     st.rerun()
 
 if st.session_state.theatre_script:

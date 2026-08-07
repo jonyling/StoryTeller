@@ -5,6 +5,7 @@ Turns a short picture-book PDF (or a picture/camera snapshot) and a voice sample
 **Default voice path:** free local **Coqui XTTS-v2** (same approach as the Havoc EN-dub pipeline). **ElevenLabs** remains as a paid backup (`TTS_BACKEND=elevenlabs`).
 
 **Session changelog:** [`CHANGES.md`](CHANGES.md)  
+**Live demo script:** [`docs/DEMO_SCRIPT.md`](docs/DEMO_SCRIPT.md)  
 **Design:** [`docs/superpowers/specs/2026-08-05-storyteller-pipeline-design.md`](docs/superpowers/specs/2026-08-05-storyteller-pipeline-design.md)  
 **Companion addendum:** [`docs/2026-08-05-storyteller-companion-mode-addendum.md`](docs/2026-08-05-storyteller-companion-mode-addendum.md)
 
@@ -52,17 +53,23 @@ Pick theme / **language (EN / 中文)**, story source, then a voice:
 - **My voice → Upload** — WAV/MP3 file
 - **My voice → Record** — custom browser mic panel (`mic_component/`): **Check level** (meter), **Record/Stop**, preview, then Generate
 
-Then **Generate**. After narration:
+Then **Generate**. After narration the page is **top → bottom**:
 
-- Scroll the **Story & Companion — in order** feed (chapters, Q&A, continues top → bottom)
-- **Continue story** or **Ask** (voice or text) at the bottom — new beats append below
-- Each of those shows a themed, staged progress status (with a ticking elapsed clock) while it works — these can take 30s-2min on CPU-only XTTS
+| Section | What it does |
+| :--- | :--- |
+| **Play entire story so far** | Full-story WAV player |
+| **Read along** (expander) | Sentence-by-sentence text, emotion badge, prev/next, per-sentence audio |
+| **Story & Companion — in order** | Chronological feed: chapters, your questions, narrator answers, Continue beats |
+| **Add next** | **Continue story** · **Type a question** + **Ask** · **Ask with your voice** (mic) |
+
+New Companion actions append to the feed above. Each long wait shows a staged status with an elapsed clock (30s–2min on CPU-only XTTS is normal).
 
 ### Browser / mic tips
 
 - Prefer **Edge** for headphone playback; Brave/Chrome may need **Download** on quiet mono clips.
 - In the mic dropdown, pick **External Mic / Realtek** — not Steam Streaming Microphone.
-- **Check level** is a meter only, not playback. After Record, use the player below the mic or **Send question**.
+- **Check level** is a meter only. After Record/Stop, use the in-box player, then **Add to Companion** (that starts Whisper + the answer).
+- If the mic player or Add button is missing, hard-refresh (**Ctrl+Shift+R**) — the iframe UI is cached aggressively.
 
 ## Pipeline (current)
 
