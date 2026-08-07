@@ -4,17 +4,22 @@ from __future__ import annotations
 import concurrent.futures
 from collections import OrderedDict
 
-from pipeline.audio_utils import slice_audio_by_sentences
+from pipeline.audio_utils import mix_ambience_under_narration, slice_audio_by_sentences
 from pipeline.prosody import EMOTION_DSP_DEFAULTS
 from pipeline.sfx import fetch_ambience_clip
 from pipeline.theatre import RuleBasedTheatreAdapter, theatre_lines_to_script_doc
 
 _EMOTION_SFX_MOOD = {
     "angry": "thunderstorm",
-    "excited": "cheerful sparkle",
+    # "cheerful sparkle" and "quiet room tone" were empirically confirmed (live
+    # Freesound queries) to return musical/off-vibe top results ("cheerful sparkle"
+    # returned a calm/mellow chime track; "quiet room tone" returned an orchestral
+    # recording) despite better matches existing further down the same result set —
+    # these two phrasings return consistently on-vibe, ambience-tagged results instead.
+    "excited": "carnival atmosphere",
     "sad": "gentle rain",
     "calm": "flowing river",
-    "neutral": "quiet room tone",
+    "neutral": "room tone",
 }
 
 
@@ -143,6 +148,10 @@ def run_pipeline(
     by_page: OrderedDict[int, list] = OrderedDict()
     for line, clip_bytes, page_no in zip(theatre_lines, clips, page_nums):
         dsp = EMOTION_DSP_DEFAULTS.get(line.emotion, EMOTION_DSP_DEFAULTS["neutral"])
+        if clip_bytes and enable_sfx:
+            ambience_clip = ambience_by_emotion.get(line.emotion)
+            if ambience_clip:
+                clip_bytes = mix_ambience_under_narration(clip_bytes, ambience_clip)
         by_page.setdefault(int(page_no), []).append(
             {
                 "text": line.text,

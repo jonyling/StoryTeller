@@ -2,9 +2,11 @@ import io
 
 import pytest
 from pydub import AudioSegment
+from pydub.generators import Sine
 
 from pipeline.audio_utils import (
     get_duration_seconds,
+    mix_ambience_under_narration,
     slice_audio_by_sentences,
     validate_duration,
 )
@@ -91,3 +93,86 @@ def test_slice_audio_by_sentences_falls_back_when_text_not_found():
     assert len(clips) == 1
     assert isinstance(clips[0], bytes)
     assert len(clips[0]) > 0
+
+
+def _tone_wav_bytes(duration_ms: int, freq: int = 440) -> bytes:
+    from pydub.generators import Sine
+
+    buffer = io.BytesIO()
+    # -20dBFS leaves headroom so overlaying two tones doesn't clip and skew
+    # the dBFS comparisons below — real narration/ambience recordings have
+    # similar headroom; full-scale sines would be an unrealistic worst case.
+    tone = Sine(freq).to_audio_segment(duration=duration_ms).apply_gain(-20)
+    tone.export(buffer, format="wav")
+    return buffer.getvalue()
+
+
+def test_mix_ambience_under_narration_returns_narration_unchanged_when_no_ambience():
+    narration = _tone_wav_bytes(1000)
+
+    mixed = mix_ambience_under_narration(narration, None)
+
+    assert mixed == narration
+
+
+def test_mix_ambience_under_narration_preserves_narration_duration():
+    narration = _tone_wav_bytes(3000, freq=440)
+    ambience = _tone_wav_bytes(500, freq=220)  # shorter than narration — must loop
+
+    mixed = mix_ambience_under_narration(narration, ambience)
+
+    assert get_duration_seconds(mixed) == pytest.approx(3.0, abs=0.05)
+
+
+def test_mix_ambience_under_narration_ducks_loud_ambience_under_narration_level():
+    narration = _tone_wav_bytes(2000, freq=440)
+    loud_ambience_segment = Sine(220).to_audio_segment(duration=2000).apply_gain(-5)
+    buf = io.BytesIO()
+    loud_ambience_segment.export(buf, format="wav")
+    loud_ambience_bytes = buf.getvalue()
+    narration_segment = AudioSegment.from_file(io.BytesIO(narration))
+
+    mixed_bytes = mix_ambience_under_narration(narration, loud_ambience_bytes)
+    mixed_segment = AudioSegment.from_file(io.BytesIO(mixed_bytes))
+
+    # Even though the raw ambience clip started well louder than narration,
+    # the mix must still duck it down to a background level relative to the
+    # narration's own loudness, not just apply a fixed attenuation that
+    # assumes a particular starting loudness.
+    assert mixed_segment.dBFS > narration_segment.dBFS
+    assert mixed_segment.dBFS < narration_segment.dBFS + 3
+
+
+def test_mix_ambience_under_narration_normalizes_regardless_of_ambience_starting_loudness():
+    # Regression: a fixed absolute attenuation (e.g. -18dB) assumes the raw
+    # ambience clip already sits near narration's loudness. Real Freesound
+    # ambience clips are often already quiet (~-25dBFS) relative to XTTS
+    # narration (~-20 to -25dBFS) — attenuating further by a fixed amount
+    # pushed them down to ~-43dBFS, effectively inaudible. Ducking must be
+    # relative to how loud the narration actually is: a very quiet raw
+    # ambience clip and a very loud one should land at close to the same
+    # final mix level once both are ducked under the SAME narration.
+    narration = _tone_wav_bytes(2000, freq=440)
+
+    def tone_wav(gain_db):
+        buf = io.BytesIO()
+        Sine(220).to_audio_segment(duration=2000).apply_gain(gain_db).export(buf, format="wav")
+        return buf.getvalue()
+
+    mixed_from_quiet = AudioSegment.from_file(
+        io.BytesIO(mix_ambience_under_narration(narration, tone_wav(-40)))
+    )
+    mixed_from_loud = AudioSegment.from_file(
+        io.BytesIO(mix_ambience_under_narration(narration, tone_wav(-5)))
+    )
+
+    assert mixed_from_quiet.dBFS == pytest.approx(mixed_from_loud.dBFS, abs=0.3)
+
+
+def test_mix_ambience_under_narration_trims_ambience_longer_than_narration():
+    narration = _tone_wav_bytes(1000)
+    ambience = _tone_wav_bytes(5000, freq=220)
+
+    mixed = mix_ambience_under_narration(narration, ambience)
+
+    assert get_duration_seconds(mixed) == pytest.approx(1.0, abs=0.05)

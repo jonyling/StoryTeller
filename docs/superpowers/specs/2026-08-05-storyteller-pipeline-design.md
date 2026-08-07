@@ -313,16 +313,36 @@ cuts a clip for it from the one synthesized take:
 
 ### 6.4 SFX (`sfx.py`)
 
-Unchanged internally from the original design — `fetch_ambience_clip(mood,
-api_key, cache_dir)` queries Freesound, picks the top-rated result (no
-license filtering — same known POC-level gap as before), downloads and
-caches by mood keyword. What changed is the call pattern: `orchestrator.py`
-calls it once per **distinct emotion** actually present in the story (via a
-fixed `_EMOTION_SFX_MOOD` map: angry→"thunderstorm", excited→"cheerful
-sparkle", sad→"gentle rain", calm→"flowing river", neutral→"quiet room
-tone"), not once per whole-story mood. There is no mixing step — the UI
-plays each fetched clip as its own simultaneous looping element per
-sentence, exactly as it was already designed to.
+`orchestrator.py` calls `fetch_ambience_clip(mood, api_key, cache_dir)` once
+per **distinct emotion** actually present in the story (via a fixed
+`_EMOTION_SFX_MOOD` map: angry→"thunderstorm", excited→"carnival
+atmosphere", sad→"gentle rain", calm→"flowing river", neutral→"room tone"),
+not once per whole-story mood. There is no mixing step — the UI plays each
+fetched clip as its own simultaneous looping element per sentence, exactly
+as it was already designed to.
+
+**Selection logic (revised after a real quality complaint):** live-testing
+the original five mood queries against Freesound found the top result for
+two of them was a poor match despite better candidates being one or two
+positions lower in the same result set — "cheerful sparkle" (excited)
+returned a calm/mellow chime track; "quiet room tone" (neutral) returned an
+orchestral/choir recording. Root cause: the original implementation only
+ever requested one result (`page_size=1`), sorted by `sort=rating_desc` —
+but every real result checked came back with `rating: None`, so that sort
+was silently doing nothing. Fixed by requesting 10 candidates sorted by
+`downloads_desc` (a field Freesound actually populates) and re-ranking them
+by how many ambience-indicating tags each has (`ambient`, `ambience`,
+`field-recording`, `room-tone`, `soundscape`, etc. — see
+`_AMBIENCE_TAG_HINTS` in `sfx.py`), falling back to the downloads-sorted
+order when no candidate matches any hint (never worse than the old
+behavior, only better when a clearly better-tagged option exists). The two
+worst-performing mood phrases were also reworded to more literal sound
+descriptors ("cheerful sparkle" → "carnival atmosphere", "quiet room tone" →
+"room tone"), verified live to return clean, consistently on-vibe results.
+No license filtering still applied — same known POC-level gap as before.
+Once fetched, a clip is cached by mood keyword indefinitely; this fix
+doesn't change that, so a newly-fixed mood only actually improves once its
+old cache entry (if any) has expired or been cleared.
 
 ### 6.5 UI (`app.py`)
 

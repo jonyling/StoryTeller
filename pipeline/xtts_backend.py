@@ -11,7 +11,7 @@ import tempfile
 import threading
 from pathlib import Path
 
-from pipeline.prosody import apply_prosody_to_wav_bytes, strip_delivery_tags
+from pipeline.prosody import apply_prosody_to_wav_bytes, rate_to_speed, strip_delivery_tags
 
 _LANGUAGE_CODES = {"English": "en", "Mandarin": "zh"}
 
@@ -140,7 +140,7 @@ class XTTSNarrationSynthesizer:
             self._tts = XTTS("tts_models/multilingual/multi-dataset/xtts_v2").to(device)
             self._device = device
 
-    def _synth_one(self, text: str, ref: str, lang: str) -> bytes:
+    def _synth_one(self, text: str, ref: str, lang: str, speed: float = 1.0) -> bytes:
         with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
             out_path = tmp.name
         try:
@@ -150,6 +150,7 @@ class XTTSNarrationSynthesizer:
                 speaker_wav=ref,
                 language=lang,
                 split_sentences=True,
+                speed=speed,
             )
             return Path(out_path).read_bytes()
         finally:
@@ -181,6 +182,7 @@ class XTTSNarrationSynthesizer:
                 clips.append(b"")
                 continue
 
+            speed = rate_to_speed(int(getattr(line, "rate", 3)))
             chunks = _chunk_text_for_xtts(text)
             chunk_wavs = []
             for c_i, chunk in enumerate(chunks, start=1):
@@ -188,7 +190,7 @@ class XTTSNarrationSynthesizer:
                     on_progress(
                         f"XTTS {idx}/{total} (part {c_i}/{len(chunks)}) on {self._device}"
                     )
-                chunk_wavs.append(self._synth_one(chunk, ref, lang))
+                chunk_wavs.append(self._synth_one(chunk, ref, lang, speed=speed))
             dry = _concat_wav_bytes(chunk_wavs)
             shaped = apply_prosody_to_wav_bytes(
                 dry,

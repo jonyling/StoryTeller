@@ -6,6 +6,19 @@ import requests
 
 FREESOUND_SEARCH_URL = "https://freesound.org/apiv2/search/"
 
+# Freesound's own "rating" field is empty for most sounds (confirmed empirically —
+# every result across five real mood queries came back with rating=None), so
+# sort=rating_desc silently does nothing. downloads_desc is a real, populated signal.
+# On top of that, a loose text query can still latch onto a tangentially-tagged but
+# wrong-vibe result (e.g. "cheerful sparkle" -> a calm/mellow chime track). Pulling
+# multiple candidates and preferring whichever one actually looks tagged like ambience
+# catches that without needing an extra API call.
+_AMBIENCE_TAG_HINTS = {
+    "ambient", "ambience", "ambiance", "atmosphere", "atmos", "atmospheric",
+    "field-recording", "loop", "background", "background-sound", "room-tone",
+    "roomtone", "nature", "outdoor", "indoor", "drone", "soundscape",
+}
+
 
 def fetch_ambience_clip(mood: str, api_key: str, cache_dir: str) -> typing.Optional[bytes]:
     os.makedirs(cache_dir, exist_ok=True)
@@ -19,10 +32,10 @@ def fetch_ambience_clip(mood: str, api_key: str, cache_dir: str) -> typing.Optio
         headers={"Authorization": f"Token {api_key}"},
         params={
             "query": mood,
-            "fields": "id,name,previews,license,duration",
+            "fields": "id,name,previews,license,duration,tags",
             "filter": "duration:[5.0 TO 120.0]",
-            "sort": "rating_desc",
-            "page_size": 1,
+            "sort": "downloads_desc",
+            "page_size": 10,
         },
         timeout=15,
     )
@@ -31,7 +44,8 @@ def fetch_ambience_clip(mood: str, api_key: str, cache_dir: str) -> typing.Optio
     if not results:
         return None
 
-    preview_url = results[0]["previews"]["preview-hq-mp3"]
+    best = _pick_best_result(results)
+    preview_url = best["previews"]["preview-hq-mp3"]
     audio_response = requests.get(
         preview_url,
         headers={"Authorization": f"Token {api_key}"},
@@ -43,6 +57,22 @@ def fetch_ambience_clip(mood: str, api_key: str, cache_dir: str) -> typing.Optio
     with open(cache_path, "wb") as f:
         f.write(audio_bytes)
     return audio_bytes
+
+
+def _pick_best_result(results):
+    """Prefer whichever candidate (already sorted by downloads_desc) has the most
+    ambience-indicating tags; ties (including "no candidate has any") keep the
+    original downloads_desc order, so this only ever reorders in favor of a clearly
+    better-tagged match, never away from a reasonable default."""
+    scored = [(_ambience_score(result), position) for position, result in enumerate(results)]
+    scored.sort(key=lambda item: (-item[0], item[1]))
+    best_position = scored[0][1]
+    return results[best_position]
+
+
+def _ambience_score(result) -> int:
+    tags = {tag.lower() for tag in result.get("tags") or []}
+    return len(tags & _AMBIENCE_TAG_HINTS)
 
 
 def _cache_path(cache_dir: str, mood: str) -> str:

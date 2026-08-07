@@ -29,6 +29,17 @@ def map_dsp_params(pitch: int, rate: int, volume: int) -> tuple[float, float, fl
     return pitch_st, tempo, gain_db
 
 
+def rate_to_speed(rate: int) -> float:
+    """Tempo for a rate DSP value, for XTTS's native `speed` synthesis kwarg.
+
+    Same formula as map_dsp_params' tempo — exposed standalone so tempo can
+    be set at generation time (no post-hoc time-stretch artifact) instead of
+    via apply_prosody_to_wav_bytes.
+    """
+    _, tempo, _ = map_dsp_params(3, rate, 3)
+    return tempo
+
+
 def strip_delivery_tags(text: str) -> str:
     """Remove inline [whispers]/[gasps] tags so XTTS does not read them aloud."""
     cleaned = _BRACKET_TAG_PATTERN.sub(" ", text or "")
@@ -41,38 +52,30 @@ def apply_prosody_to_wav_bytes(
     rate: int = 3,
     volume: int = 3,
 ) -> bytes:
-    """Apply pitch/tempo/gain to a WAV (or other) clip; return WAV bytes."""
+    """Apply gain to a WAV (or other) clip; return WAV bytes.
+
+    pitch/rate are accepted for call-site compatibility but no longer shape
+    the audio here: librosa's pitch_shift/time_stretch (phase vocoder) gave
+    XTTS output a watery/echoey artifact even at the milder ±1st/±6% range
+    this used to use. Tempo is now set natively via XTTS's own `speed` kwarg
+    at synthesis time (see rate_to_speed / xtts_backend.py) — no post-hoc
+    resampling artifact. Pitch has no artifact-free equivalent available, so
+    emotional pitch variation was dropped rather than kept at that cost.
+    """
     import numpy as np
     import soundfile as sf
 
-    pitch_st, tempo, gain_db = map_dsp_params(pitch, rate, volume)
-    if abs(pitch_st) < 0.05 and abs(tempo - 1.0) < 0.01 and abs(gain_db) < 0.01:
-        # Still normalize container to WAV for consistent st.audio playback
-        try:
-            data, sr = sf.read(io.BytesIO(wav_bytes), always_2d=False)
-        except Exception:
-            return wav_bytes
-        out = io.BytesIO()
-        sf.write(out, np.asarray(data, dtype=np.float32), sr, format="WAV")
-        return out.getvalue()
-
-    import librosa
-
+    _, _, gain_db = map_dsp_params(pitch, rate, volume)
     data, sr = sf.read(io.BytesIO(wav_bytes), always_2d=False)
     wav = np.asarray(data, dtype=np.float32)
     if wav.ndim > 1:
         wav = wav.mean(axis=1)
 
-    if abs(pitch_st) > 0.05:
-        wav = librosa.effects.pitch_shift(wav, sr=sr, n_steps=pitch_st)
-    if abs(tempo - 1.0) > 0.01:
-        wav = librosa.effects.time_stretch(wav, rate=tempo)
     if abs(gain_db) > 0.01:
         wav = wav * (10 ** (gain_db / 20.0))
-
-    peak = float(np.max(np.abs(wav)) or 1.0)
-    if peak > 0.99:
-        wav = wav * (0.99 / peak)
+        peak = float(np.max(np.abs(wav)) or 1.0)
+        if peak > 0.99:
+            wav = wav * (0.99 / peak)
 
     out = io.BytesIO()
     sf.write(out, wav, sr, format="WAV")

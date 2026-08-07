@@ -112,8 +112,35 @@ def test_run_pipeline_with_sfx_fetches_ambience_per_distinct_emotion(mock_fetch_
     assert result.used_sfx is True
     assert mock_fetch_ambience.call_count == 2
     called_moods = {call.args[0] for call in mock_fetch_ambience.call_args_list}
-    assert called_moods == {"flowing river", "cheerful sparkle"}
+    assert called_moods == {"flowing river", "carnival atmosphere"}
     assert set(result.ambience_by_emotion.keys()) == {"calm", "excited"}
+    # Ambience must actually be mixed into each sentence's playable audio, not
+    # just fetched — mix_ambience_under_narration always exports WAV, while
+    # the unmixed narration path here is MP3, so a RIFF header proves mixing
+    # happened rather than the ambience being fetched and silently dropped.
+    for sent in result.pages[0]["sentences"]:
+        assert bytes(sent["audio_path"])[:4] == b"RIFF"
+
+
+@patch("pipeline.orchestrator.fetch_ambience_clip")
+def test_run_pipeline_without_sfx_does_not_mix_ambience(mock_fetch_ambience, tmp_path):
+    narration_synth = FakeNarrationSynthesizer()
+
+    result = run_pipeline(
+        images=_sample_images(),
+        voice_bytes=_fake_voice_bytes(),
+        language="English",
+        enable_sfx=False,
+        story_generator=FakeStoryGenerator(),
+        voice_cloner=FakeVoiceCloner(),
+        narration_synthesizer=narration_synth,
+        freesound_api_key="fake-key",
+        sfx_cache_dir=str(tmp_path),
+    )
+
+    mock_fetch_ambience.assert_not_called()
+    for sent in result.pages[0]["sentences"]:
+        assert bytes(sent["audio_path"])[:4] != b"RIFF"
 
 
 @patch("pipeline.orchestrator.fetch_ambience_clip")
@@ -161,6 +188,34 @@ def test_run_pipeline_per_sentence_backend_skips_timestamp_slice(mock_fetch_ambi
     assert "stage_direction" in result.pages[0]["sentences"][0]
     assert result.theatre_script["schema_version"] == "theatre-v1"
     assert len(result.pages[0]["sentences"]) == 2
+
+
+@patch("pipeline.orchestrator.fetch_ambience_clip")
+def test_run_pipeline_per_sentence_backend_mixes_ambience_when_sfx_enabled(mock_fetch_ambience, tmp_path):
+    """XTTS (the production default) synthesizes per-sentence directly — this
+    path must mix ambience too, not just the ElevenLabs whole-story-then-slice
+    path exercised by test_run_pipeline_with_sfx_fetches_ambience_per_distinct_emotion."""
+    mock_fetch_ambience.return_value = _silence_mp3_bytes(500)
+
+    class PerSentenceSynth:
+        def synthesize_sentences(self, lines, voice_id, language):
+            return [_silence_mp3_bytes(200), _silence_mp3_bytes(150)]
+
+    result = run_pipeline(
+        images=_sample_images(),
+        voice_bytes=_fake_voice_bytes(),
+        language="English",
+        enable_sfx=True,
+        story_generator=FakeStoryGenerator(),
+        voice_cloner=FakeVoiceCloner(),
+        narration_synthesizer=PerSentenceSynth(),
+        freesound_api_key="fake-key",
+        sfx_cache_dir=str(tmp_path),
+    )
+
+    assert result.used_sfx is True
+    for sent in result.pages[0]["sentences"]:
+        assert bytes(sent["audio_path"])[:4] == b"RIFF"
 
 
 @patch("pipeline.orchestrator.fetch_ambience_clip")
