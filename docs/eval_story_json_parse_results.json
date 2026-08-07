@@ -1,0 +1,68 @@
+{
+  "n_trials": 10,
+  "counts": {
+    "clean": 10
+  },
+  "results": [
+    {
+      "outcome": "clean",
+      "elapsed_s": 7.2,
+      "n_sentences": 10,
+      "raw_preview": "{\n  \"sentences\": [\n    {\n      \"text\": \"[gasping] Look, a hidden treasure chamber!\" ,\n      \"speaker\": \"Minion\",\n      \""
+    },
+    {
+      "outcome": "clean",
+      "elapsed_s": 4.71,
+      "n_sentences": 12,
+      "raw_preview": "{\"sentences\":[{\"text\":\"In a dark cave, two brave friends held their torches high, their flames flickering softly against"
+    },
+    {
+      "outcome": "clean",
+      "elapsed_s": 4.12,
+      "n_sentences": 10,
+      "raw_preview": "{\"sentences\":[{\"text\":\"In a mysterious cave, two friends, Minion and Cthulhu, stood together, clutching their torches ti"
+    },
+    {
+      "outcome": "clean",
+      "elapsed_s": 4.19,
+      "n_sentences": 8,
+      "raw_preview": "{\"sentences\":[{\"text\":\"In a dark cave, two friends, Minion and Squiggle, bravely held their torches high. \",\"speaker\":\"n"
+    },
+    {
+      "outcome": "clean",
+      "elapsed_s": 5.56,
+      "n_sentences": 10,
+      "raw_preview": "{\n  \"sentences\": [\n    {\n      \"text\": \"In the dark, mysterious cave, two friends trembled with excitement, holding thei"
+    },
+    {
+      "outcome": "clean",
+      "elapsed_s": 5.46,
+      "n_sentences": 8,
+      "raw_preview": "{\n  \"sentences\": [\n    {\n      \"text\": \"In the dimly lit cave, Kevin the Minion held his torch high, [whispers] \\\"What s"
+    },
+    {
+      "outcome": "clean",
+      "elapsed_s": 4.75,
+      "n_sentences": 9,
+      "raw_preview": "{\"sentences\":[{\"text\":\"Once upon a time, in a dark and mysterious cave, two brave friends named Timmy the Minion and Cth"
+    },
+    {
+      "outcome": "clean",
+      "elapsed_s": 4.2,
+      "n_sentences": 8,
+      "raw_preview": "{\"sentences\":[{\"text\":\"In a dark cave, two brave friends, Mike the Minion and Ollie the Octopus, held their torches high"
+    },
+    {
+      "outcome": "clean",
+      "elapsed_s": 4.77,
+      "n_sentences": 10,
+      "raw_preview": "{\"sentences\":[{\"text\":\"In a dark cave, two brave friends, Max the Minion and Ollie the Octopus, stood nervously with the"
+    },
+    {
+      "outcome": "clean",
+      "elapsed_s": 5.12,
+      "n_sentences": 9,
+      "raw_preview": "{\n  \"sentences\": [\n    {\n      \"text\": \"In a dark cave, two friends, Bob the Minion and Gus the Friendly Cthulhu, held t"
+    }
+  ]
+}
