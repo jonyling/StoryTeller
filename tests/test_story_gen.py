@@ -134,6 +134,80 @@ def test_openai_story_generator_keeps_leading_tag_only_sentence_when_no_previous
     assert result.sentences[0].text == "[gasps]"
 
 
+def test_openai_story_generator_strips_leaked_json_fragment_from_sentence_text():
+    # Long stories can push the model past its structured-output reliability.
+    # Observed in production: the JSON itself parses fine (single quotes
+    # inside a double-quoted JSON string need no escaping), but the
+    # sentence's own "text" value trails off into the model's own
+    # "speaker"/"emotion" schema instead of stopping at the real sentence.
+    fake_client = MagicMock()
+    payload = {
+        "sentences": [
+            {
+                "text": (
+                    "Kevin whispered, 'Wow, do you think it's guarding the "
+                    "treasure?','speaker':'Kevin','emotion':'calm'"
+                ),
+                "speaker": "Kevin",
+                "emotion": "calm",
+            },
+        ]
+    }
+    fake_client.chat.completions.create.return_value.choices = [
+        MagicMock(message=MagicMock(content=json.dumps(payload)))
+    ]
+    generator = OpenAIStoryGenerator(fake_client)
+
+    result = generator.generate(_sample_images(1), "English")
+
+    assert result.sentences[0].text == (
+        "Kevin whispered, 'Wow, do you think it's guarding the treasure?'"
+    )
+
+
+def test_openai_story_generator_leaves_normal_dialogue_with_apostrophes_untouched():
+    fake_client = MagicMock()
+    payload = {
+        "sentences": [
+            {"text": "Squiddy said, 'I hope it's friendly!'", "speaker": "Squiddy", "emotion": "calm"},
+        ]
+    }
+    fake_client.chat.completions.create.return_value.choices = [
+        MagicMock(message=MagicMock(content=json.dumps(payload)))
+    ]
+    generator = OpenAIStoryGenerator(fake_client)
+
+    result = generator.generate(_sample_images(1), "English")
+
+    assert result.sentences[0].text == "Squiddy said, 'I hope it's friendly!'"
+
+
+def test_openai_story_generator_uses_a_generous_token_budget_for_long_stories():
+    fake_client = MagicMock()
+    fake_client.chat.completions.create.return_value.choices = [
+        MagicMock(message=MagicMock(content=json.dumps(_payload())))
+    ]
+    generator = OpenAIStoryGenerator(fake_client)
+
+    generator.generate(_sample_images(1), "English")
+
+    _, kwargs = fake_client.chat.completions.create.call_args
+    assert kwargs["max_tokens"] >= 4000
+
+
+def test_claude_story_generator_uses_a_generous_token_budget_for_long_stories():
+    fake_client = MagicMock()
+    fake_client.messages.create.return_value.content = [
+        MagicMock(type="text", text=json.dumps(_payload())),
+    ]
+    generator = ClaudeStoryGenerator(fake_client)
+
+    generator.generate(_sample_images(1), "English")
+
+    _, kwargs = fake_client.messages.create.call_args
+    assert kwargs["max_tokens"] >= 4000
+
+
 def test_openai_story_generator_falls_back_to_neutral_for_unknown_emotion():
     fake_client = MagicMock()
     payload = {"sentences": [{"text": "Hello.", "speaker": "narrator", "emotion": "confused"}]}

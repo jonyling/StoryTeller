@@ -11,6 +11,16 @@ from pipeline.prosody import strip_delivery_tags
 _LANGUAGE_NAMES = {"English": "English", "Mandarin": "Mandarin Chinese"}
 VALID_EMOTIONS = {"angry", "excited", "sad", "calm", "neutral"}
 _JSON_FENCE = re.compile(r"```(?:json)?\s*([\s\S]*?)\s*```", re.IGNORECASE)
+# For long stories, the model can run its own "speaker"/"emotion" schema
+# into a sentence's "text" value instead of stopping at the real sentence —
+# the JSON itself still parses fine (single quotes need no escaping inside
+# a double-quoted JSON string), so this can't be caught at the JSON-parse
+# level; it has to be cleaned up after parsing.
+_LEAKED_JSON_TAIL = re.compile(
+    r"""\s*,\s*['"]speaker['"]\s*:\s*['"][^'"]*['"]\s*"""
+    r"""(?:,\s*['"]emotion['"]\s*:\s*['"][^'"]*['"]?)?\s*\}?\s*$""",
+    re.IGNORECASE,
+)
 
 
 class StorySentence:
@@ -113,7 +123,7 @@ def _parse_story_payload(raw_json: str) -> StoryResult:
         )
     sentences = [
         StorySentence(
-            text=item["text"],
+            text=_LEAKED_JSON_TAIL.sub("", item["text"]),
             speaker=item["speaker"],
             emotion=_normalize_emotion(item["emotion"]),
         )
@@ -152,7 +162,11 @@ def _generate_via_openai_compatible_chat(client, model: str, images, language: s
         kwargs = {
             "model": model,
             "messages": [{"role": "user", "content": content}],
-            "max_tokens": 1500,
+            # 1500 was too tight for longer stories — near the ceiling the
+            # model can lose track of proper JSON structure and spill its
+            # own "speaker"/"emotion" schema into a sentence's text instead
+            # of stopping cleanly (see _LEAKED_JSON_TAIL above).
+            "max_tokens": 4000,
         }
         if use_json_object:
             kwargs["response_format"] = {"type": "json_object"}
@@ -221,7 +235,7 @@ class ClaudeStoryGenerator:
             })
         response = self._client.messages.create(
             model=self._model,
-            max_tokens=1500,
+            max_tokens=4000,
             thinking={"type": "disabled"},
             messages=[{"role": "user", "content": content}],
         )
