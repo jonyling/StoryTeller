@@ -14,7 +14,7 @@ import streamlit.components.v1 as components
 _FRONTEND = os.path.join(os.path.dirname(__file__), "frontend")
 # Bump the component name when the iframe UI changes so Streamlit/browsers
 # don't keep serving a cached shell that clips the preview + Add button.
-_recorder = components.declare_component("storyteller_mic_recorder_v4", path=_FRONTEND)
+_recorder = components.declare_component("storyteller_mic_recorder_v5", path=_FRONTEND)
 
 
 def record_voice(

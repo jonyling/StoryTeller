@@ -135,10 +135,11 @@
         nothingToPush: "Nothing to push — Record first.",
         previewHint: "Play the take above, then click <b>Add to Companion</b>.",
         pushBtn: "Add to Companion",
-        sentOk: (kb, peak) =>
-          "Ready · " + kb + " KB · peak " + peak + "%. Click Add to Companion to get an answer.",
+        readyLocal: (kb, peak) =>
+          "Take ready · " + kb + " KB · peak " + peak + "%. Play it, then click Add to Companion.",
         pushedSubmit: (kb, peak) =>
           "Sent to Companion · " + kb + " KB · peak " + peak + "%. Working on your answer…",
+        restored: "Restored last take after page refresh — click Add to Companion.",
       },
       zh: {
         title: "<b>试听音量＋录音</b> —— 两者使用同一个设备（避免 Streamlit 内建录音器无声）。",
@@ -153,10 +154,11 @@
         nothingToPush: "还没有可推送的内容——请先录音。",
         previewHint: "先播放上方录音，再点击<b>加入问答</b>。",
         pushBtn: "加入问答",
-        sentOk: (kb, peak) =>
-          "已就绪 · " + kb + " KB · 峰值 " + peak + "%。点击「加入问答」获取回答。",
+        readyLocal: (kb, peak) =>
+          "录音就绪 · " + kb + " KB · 峰值 " + peak + "%。可先试听，再点「加入问答」。",
         pushedSubmit: (kb, peak) =>
           "已送入问答 · " + kb + " KB · 峰值 " + peak + "%。正在回答……",
+        restored: "页面刷新后已恢复上一段录音——请点击「加入问答」。",
       },
     };
     let lang = "en";
@@ -184,6 +186,7 @@
     let timerIv = 0;
     let lastPayload = null;
     let lastBlobUrl = null;
+    const STORAGE_KEY = "storyteller_mic_last_take_v1";
 
     function setStatus(msg) { status.textContent = msg; }
 
@@ -200,12 +203,30 @@
       Streamlit.setFrameHeight(Math.max(measured + 8, need));
     }
 
-    function showLocalPreview(blob, payload) {
+    function persistTake(payload) {
+      try {
+        sessionStorage.setItem(STORAGE_KEY, JSON.stringify({
+          mime: payload.mime,
+          data_b64: payload.data_b64,
+          peak: payload.peak,
+          bytes: payload.bytes,
+        }));
+      } catch (e) { /* quota / private mode */ }
+    }
+
+    function clearPersistedTake() {
+      try { sessionStorage.removeItem(STORAGE_KEY); } catch (e) {}
+    }
+
+    function showLocalPreview(blob, payload, statusMsg) {
       lastPayload = payload;
+      persistTake(payload);
       if (lastBlobUrl) URL.revokeObjectURL(lastBlobUrl);
       lastBlobUrl = URL.createObjectURL(blob);
       previewAudio.src = lastBlobUrl;
       previewWrap.style.display = "block";
+      pushBtn.disabled = false;
+      if (statusMsg) setStatus(statusMsg);
       bumpHeight();
       // Double-rAF + delayed bumps so audio controls finish layout
       requestAnimationFrame(() => requestAnimationFrame(bumpHeight));
@@ -214,23 +235,34 @@
       setTimeout(bumpHeight, 500);
     }
 
+    function restorePersistedTake() {
+      let raw;
+      try { raw = sessionStorage.getItem(STORAGE_KEY); } catch (e) { return; }
+      if (!raw) return;
+      let payload;
+      try { payload = JSON.parse(raw); } catch (e) { return; }
+      if (!payload || !payload.data_b64) return;
+      const bin = Uint8Array.from(atob(payload.data_b64), (c) => c.charCodeAt(0));
+      const blob = new Blob([bin], { type: payload.mime || "audio/wav" });
+      showLocalPreview(blob, payload, t("restored"));
+    }
+
     function pushPayload(payload, intent) {
       // Unique take id every push — WebM headers make data_b64 prefixes collide
       const stamped = Object.assign({}, payload, {
         take_id: Date.now() + "_" + Math.random().toString(36).slice(2),
-        intent: intent || "preview",
+        intent: intent || "submit",
       });
       lastPayload = stamped;
+      persistTake(payload);
       bumpHeight();
+      pushBtn.disabled = true;
       Streamlit.setComponentValue(stamped);
       const kb = Math.round((payload.bytes || 0) / 1024);
       const peakPct = Math.round((payload.peak || 0) * 100);
-      setStatus(
-        intent === "submit"
-          ? t("pushedSubmit", kb, peakPct)
-          : t("sentOk", kb, peakPct)
-      );
-      // Streamlit's render after setComponentValue used to shrink the iframe — re-bump.
+      setStatus(t("pushedSubmit", kb, peakPct));
+      if (intent === "submit") clearPersistedTake();
+      // Streamlit remounts the iframe after setComponentValue — re-bump while we still can.
       setTimeout(bumpHeight, 50);
       setTimeout(bumpHeight, 200);
       setTimeout(bumpHeight, 400);
@@ -508,12 +540,12 @@
           bumpHeight();
           return;
         }
-        setStatus("Encoding take for the app…");
+        setStatus("Encoding take…");
         let wavBuf;
         try {
           wavBuf = await blobToWav16k(blob);
         } catch (e) {
-          // Fallback: send original webm if decode fails
+          // Fallback: keep original webm for local preview; user still clicks Add to Companion
           const buf = await blob.arrayBuffer();
           const payload = {
             mime: blob.type || "audio/webm",
@@ -521,8 +553,10 @@
             peak: recPeak,
             bytes: buf.byteLength,
           };
-          showLocalPreview(blob, payload);
-          setTimeout(() => pushPayload(payload, "preview"), 280);
+          const kb = Math.round(payload.bytes / 1024);
+          const peakPct = Math.round(recPeak * 100);
+          // Do NOT auto-push — setComponentValue remounts the iframe and wipes this UI.
+          showLocalPreview(blob, payload, t("readyLocal", kb, peakPct));
           return;
         }
         const wavBlob = new Blob([wavBuf], { type: "audio/wav" });
@@ -532,9 +566,10 @@
           peak: recPeak,
           bytes: wavBuf.byteLength,
         };
-        showLocalPreview(wavBlob, payload);
-        // Delay push so iframe height expands first (otherwise Streamlit clips the controls)
-        setTimeout(() => pushPayload(payload, "preview"), 280);
+        const kb = Math.round(payload.bytes / 1024);
+        const peakPct = Math.round(recPeak * 100);
+        // Local preview only. Auto-push used to remount the iframe and erase Add to Companion.
+        showLocalPreview(wavBlob, payload, t("readyLocal", kb, peakPct));
       };
 
       mediaRecorder.start(200);
@@ -559,7 +594,7 @@
         setStatus(t("nothingToPush"));
         return;
       }
-      // intent=submit tells Python to run Whisper + Companion (preview push alone does not)
+      // Only this click talks to Streamlit — intent=submit starts Whisper + Companion.
       pushPayload(lastPayload, "submit");
     });
     devicesEl.addEventListener("change", () => {
@@ -596,6 +631,7 @@
 
     listDevices().then(() => {
       Streamlit.setComponentReady();
+      restorePersistedTake();
       bumpHeight();
     });
   </script>

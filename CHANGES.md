@@ -55,8 +55,12 @@ Vision / picture / camera stories still generate directly in the selected langua
 | Prefer External Mic; hide Steam/virtual devices; dedupe labels | `mic_component/frontend/index.html` |
 | Unique `take_id` so WebM header prefixes don’t drop new takes | same + `app.py` |
 | In-iframe preview + **Add to Companion** (`intent=submit` starts Whisper + Q&A) | `mic_component/frontend/index.html`, `app.py` |
+| Stop no longer auto-pushes (that remounted the iframe and wiped Add to Companion) | `mic_component/frontend/index.html` |
+| sessionStorage restore of last take after iframe remount | same |
+| Keep `last_ask_sig` after success (clearing it re-fired stale component values) | `app.py` |
+| Streamlit **Add to Companion** CTA rendered above the mic iframe as fallback | `app.py` |
 | Iframe height floor so player + Add button aren’t clipped after Record | `mic_component/frontend/index.html` |
-| Component id bumped (`storyteller_mic_recorder_v4`) to bust browser cache | `mic_component/__init__.py` |
+| Component id bumped (`storyteller_mic_recorder_v5`) to bust browser cache | `mic_component/__init__.py` |
 | Stereo/48k + MP3 + download for Brave/Chrome headphones | `app.py` (`_for_browser_playback`, `_st_play_wav`) |
 | Typed **Ask** moved above mic panel (tall iframe was hiding the text box) | `app.py` |
 | Companion reply flash banner under controls + timeline entry | `app.py` (`flash_companion_answer`) |

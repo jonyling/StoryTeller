@@ -915,7 +915,7 @@ FORMAL_EN = {
                          "each result appends at the bottom of the feed above."),
     "continue_story_btn": "Continue story",
     "ask_voice_heading": "Ask with your voice",
-    "ask_voice_caption": ("Check level = meter only. Record/Stop → player + Add to Companion appear in the mic box. "
+    "ask_voice_caption": ("Check level = meter only. Record/Stop → play in the mic box → Add to Companion. "
                          "Prefer External Mic; in Brave use Download if the player is silent."),
     "add_to_companion_btn": "Add to Companion",
     "recording_ready_label": "Recording ready · level {pct}%",
@@ -992,7 +992,7 @@ PLAYFUL_EN = {
                          "each result appends at the bottom of the feed above."),
     "continue_story_btn": "Continue story",
     "ask_voice_heading": "Ask with your voice",
-    "ask_voice_caption": ("Check level = meter only. Record/Stop → player + Add to Companion appear in the mic box. "
+    "ask_voice_caption": ("Check level = meter only. Record/Stop → play in the mic box → Add to Companion. "
                          "Prefer External Mic; in Brave use Download if the player is silent."),
     "add_to_companion_btn": "Add to Companion",
     "recording_ready_label": "Recording ready · level {pct}%",
@@ -2582,6 +2582,26 @@ if flash:
 
 st.markdown(f"##### {C['ask_voice_heading']}")
 st.caption(C["ask_voice_caption"])
+
+# Streamlit-side Add button BEFORE the mic iframe so a remount can't hide the only CTA.
+_pending_early = st.session_state.get("pending_question_wav")
+if _pending_early and st.session_state.get("wait_kind") != "voice_q":
+    _peak_early = float(st.session_state.get("pending_question_peak") or 0)
+    st.success(C["recording_ready_label"].format(pct=int(_peak_early * 100)))
+    if _peak_early < 0.02:
+        st.error(C["recording_silent_warn"])
+    else:
+        if st.button(
+            C["add_to_companion_btn"],
+            type="primary",
+            use_container_width=True,
+            key="send_q",
+            disabled=wait_busy,
+        ):
+            st.session_state.wait_error = None
+            st.session_state.wait_kind = "voice_q"
+            st.rerun()
+
 ask_payload = record_voice(
     key="companion_ask_mic",
     bg=T["surface"], ink=T["ink"], border=T["card_border"],
@@ -2602,12 +2622,12 @@ if isinstance(ask_payload, dict) and ask_payload.get("data_b64"):
             st.session_state.pending_question_wav = wav_bytes
             st.session_state.pending_question_peak = peak
             st.session_state.last_ask_sig = sig
-            # iframe "Add to Companion" sends intent=submit → start Q&A.
-            # Stop/auto-push is intent=preview → only stage the take.
-            if ask_payload.get("intent") == "submit" and peak >= 0.02:
+            # iframe "Add to Companion" sends intent=submit → start Q&A immediately.
+            # (Stop no longer auto-pushes — that remounted the iframe and wiped the button.)
+            intent = (ask_payload.get("intent") or "submit").strip().lower()
+            if intent == "submit" and peak >= 0.02:
                 st.session_state.wait_error = None
                 st.session_state.wait_kind = "voice_q"
-                # Fall through to the voice_q handler on this same run.
             else:
                 st.rerun()
         except Exception as exc:
@@ -2623,22 +2643,7 @@ pending = st.session_state.get("pending_question_wav")
 preview = st.session_state.get("last_question_wav")
 if pending and st.session_state.get("wait_kind") != "voice_q":
     peak = float(st.session_state.get("pending_question_peak") or 0)
-    st.success(C["recording_ready_label"].format(pct=int(peak * 100)))
-    # Button first — heavy players used to push it below the fold / fail before render
-    if peak < 0.02:
-        st.error(C["recording_silent_warn"])
-    else:
-        if st.button(
-            C["add_to_companion_btn"],
-            type="primary",
-            use_container_width=True,
-            key="send_q",
-            disabled=wait_busy,
-        ):
-            st.session_state.wait_error = None
-            st.session_state.wait_kind = "voice_q"
-            st.rerun()
-    with st.expander(C["preview_download_expander"], expanded=True):
+    with st.expander(C["preview_download_expander"], expanded=False):
         _st_play_wav(
             preview or pending,
             label=C["your_recording_label"].format(pct=int(peak * 100)),
@@ -2647,8 +2652,8 @@ if pending and st.session_state.get("wait_kind") != "voice_q":
         )
 elif not pending:
     st.caption(
-        "After Record/Stop, play the take, then click **Add to Companion** in the mic box "
-        "(that step starts the answer). Hard-refresh if the button is missing."
+        "Record → Stop → play the take in the mic box → **Add to Companion**. "
+        "Hard-refresh (Ctrl+Shift+R) if that button is missing."
     )
 
 if st.session_state.get("wait_kind") == "voice_q":
@@ -2672,7 +2677,8 @@ if st.session_state.get("wait_kind") == "voice_q":
         box.update(label=C["wait_ready"], state="complete")
         st.session_state.pending_question_wav = None
         st.session_state.last_question_wav = None
-        st.session_state.last_ask_sig = None
+        # Keep last_ask_sig — clearing it re-fired the stale component value and
+        # re-ran Companion on every subsequent script run.
         st.session_state.flash_new_entry = True
     except Exception as exc:
         box.update(label=C["wait_failed"], state="error")
