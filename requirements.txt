@@ -1,3 +1,7 @@
+# PyTorch CUDA 12.6 wheels are hosted on PyTorch's package index, not PyPI.
+# The +cu126 pins below ensure pip selects the CUDA build from this index.
+--extra-index-url https://download.pytorch.org/whl/cu126
+
 streamlit>=1.38
 PyMuPDF>=1.24
 Pillow>=10.0
@@ -9,11 +13,25 @@ google-genai>=1.0
 elevenlabs>=2.0
 requests>=2.31
 pytest>=7.4
-# Free local voice clone (default TTS_BACKEND=xtts) — Havoc path
-coqui-tts>=0.27.0
+
+# Free local voice clone (default TTS_BACKEND=xtts) — Havoc path.
+# Keep this trio on matching releases. PyTorch 2.11 is the newest release
+# that provides a matching TorchAudio package, using the CUDA 12.6 build.
+torch==2.11.0+cu126
+torchvision==0.26.0+cu126
+torchaudio==2.11.0+cu126
+
+# The codec extra installs TorchCodec, required for audio I/O on PyTorch 2.9+.
+coqui-tts[codec]>=0.27.0
 transformers>=4.46,<5
 soundfile
 librosa
 numpy
+
+# FFmpeg is an OS dependency and cannot be installed by pip. StoryTeller and
+# TorchCodec require a shared build (ffmpeg/ffprobe plus avcodec DLLs).
+# Windows CMD: winget install --exact --id BtbN.FFmpeg.GPL.Shared.8.1
+# After installing, fully restart Command Prompt and the Streamlit server.
+
 # XTTS Mandarin (ZH) — Coqui raises ImportError without this
 pypinyin>=0.50
